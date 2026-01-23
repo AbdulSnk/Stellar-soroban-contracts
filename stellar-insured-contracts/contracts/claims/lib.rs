@@ -9,6 +9,14 @@ mod policy_contract {
 // Import shared types from the common library
 use insurance_contracts::types::ClaimStatus;
 
+// Oracle validation types
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleValidationConfig {
+    pub oracle_contract: Address,
+    pub require_oracle_validation: bool,
+    pub min_oracle_submissions: u32,
+}
+
 #[contract]
 pub struct ClaimsContract;
 
@@ -17,6 +25,8 @@ const PAUSED: Symbol = symbol_short!("PAUSED");
 const CONFIG: Symbol = symbol_short!("CONFIG");
 const CLAIM: Symbol = symbol_short!("CLAIM");
 const POLICY_CLAIM: Symbol = symbol_short!("P_CLAIM");
+const ORACLE_CONFIG: Symbol = symbol_short!("ORACLE_CFG");
+const CLAIM_ORACLE_ID: Symbol = symbol_short!("CLM_ORA_ID");
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -30,6 +40,10 @@ pub enum ContractError {
     InvalidState = 7,
     NotInitialized = 9,
     AlreadyInitialized = 10,
+    OracleValidationFailed = 11,
+    InsufficientOracleSubmissions = 12,
+    OracleDataStale = 13,
+    OracleOutlierDetected = 14,
 }
 
 fn validate_address(_env: &Env, _address: &Address) -> Result<(), ContractError> {
@@ -66,7 +80,93 @@ impl ClaimsContract {
         Ok(())
     }
 
-    pub fn submit_claim(env: Env, claimant: Address, policy_id: u64, amount: i128) -> Result<u64, ContractError> {
+    /// Initialize oracle validation for the claims contract
+    pub fn set_oracle_config(
+        env: Env,
+        oracle_contract: Address,
+        require_oracle_validation: bool,
+        min_oracle_submissions: u32,
+    ) -> Result<(), ContractError> {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
+
+        admin.require_auth();
+
+        validate_address(&env, &oracle_contract)?;
+
+        let config = OracleValidationConfig {
+            oracle_contract,
+            require_oracle_validation,
+            min_oracle_submissions,
+        };
+
+        env.storage().persistent().set(&ORACLE_CONFIG, &config);
+        Ok(())
+    }
+
+    /// Get current oracle configuration
+    pub fn get_oracle_config(env: Env) -> Result<OracleValidationConfig, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&ORACLE_CONFIG)
+            .ok_or(ContractError::NotFound)
+    }
+
+    /// Validate claim using oracle data
+    /// This function checks oracle submissions and enforces consensus-based validation
+    pub fn validate_claim_with_oracle(
+        env: Env,
+        claim_id: u64,
+        oracle_data_id: u64,
+    ) -> Result<bool, ContractError> {
+        // Get oracle configuration
+        let oracle_config: OracleValidationConfig = env
+            .storage()
+            .persistent()
+            .get(&ORACLE_CONFIG)
+            .ok_or(ContractError::NotFound)?;
+
+        if !oracle_config.require_oracle_validation {
+            return Ok(true);
+        }
+
+        // Get oracle submission count using invoke_contract
+        let submission_count: u32 = env.invoke_contract(
+            &oracle_config.oracle_contract,
+            &Symbol::new(&env, "get_submission_count"),
+            (oracle_data_id,).into_val(&env),
+        );
+
+        // Check minimum submissions
+        if submission_count < oracle_config.min_oracle_submissions {
+            return Err(ContractError::InsufficientOracleSubmissions);
+        }
+
+        // Attempt to resolve oracle data - this will validate consensus and staleness
+        let _oracle_data: (i128, u32, u32, u64) = env.invoke_contract(
+            &oracle_config.oracle_contract,
+            &Symbol::new(&env, "resolve_oracle_data"),
+            (oracle_data_id,).into_val(&env),
+        );
+
+        // Store oracle data ID associated with claim for audit trail
+        env.storage()
+            .persistent()
+            .set(&(CLAIM_ORACLE_ID, claim_id), &oracle_data_id);
+
+        Ok(true)
+    }
+
+    /// Get oracle data associated with a claim
+    pub fn get_claim_oracle_data(env: Env, claim_id: u64) -> Result<u64, ContractError> {
+        env.storage()
+            .persistent()
+            .get(&(CLAIM_ORACLE_ID, claim_id))
+            .ok_or(ContractError::NotFound)
+    }
         // 1. IDENTITY CHECK
         claimant.require_auth();
 
@@ -129,7 +229,7 @@ impl ClaimsContract {
         Ok(claim)
     }
 
-    pub fn approve_claim(env: Env, claim_id: u64) -> Result<(), ContractError> {
+    pub fn approve_claim(env: Env, claim_id: u64, oracle_data_id: Option<u64>) -> Result<(), ContractError> {
         let admin: Address = env
             .storage()
             .persistent()
@@ -147,6 +247,27 @@ impl ClaimsContract {
         // Can only approve claims that are UnderReview
         if claim.3 != ClaimStatus::UnderReview {
             return Err(ContractError::InvalidState);
+        }
+
+        // Check if oracle validation is required
+        if let Ok(oracle_config) = env.storage().persistent().get::<_, OracleValidationConfig>(&ORACLE_CONFIG) {
+            if oracle_config.require_oracle_validation {
+                if let Some(oracle_id) = oracle_data_id {
+                    // Validate using oracle data (store oracle data ID)
+                    let _submission_count: u32 = env.invoke_contract(
+                        &oracle_config.oracle_contract,
+                        &Symbol::new(&env, "get_submission_count"),
+                        (oracle_id,).into_val(&env),
+                    );
+
+                    // Store oracle data ID associated with claim for audit trail
+                    env.storage()
+                        .persistent()
+                        .set(&(CLAIM_ORACLE_ID, claim_id), &oracle_id);
+                } else {
+                    return Err(ContractError::OracleValidationFailed);
+                }
+            }
         }
 
         let config: (Address, Address) = env

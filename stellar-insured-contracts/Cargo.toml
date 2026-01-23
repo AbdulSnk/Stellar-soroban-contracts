@@ -7,6 +7,7 @@ members = [
     "contracts/claims",
     "contracts/risk_pool",
     "contracts/governance",
+    "contracts/oracle",
 ]
 
 [workspace.dependencies]
