@@ -8,6 +8,7 @@ members = [
     "contracts/claims",
     "contracts/risk_pool",
     "contracts/governance",
+    "contracts/slashing",
     "contracts/oracle",
 ]
 

@@ -15,6 +15,31 @@ const PROPOSAL: Symbol = Symbol::short("PROPOSAL");
 const PROPOSAL_COUNTER: Symbol = Symbol::short("PROP_CNT");
 const VOTER: Symbol = Symbol::short("VOTER");
 const PROPOSAL_LIST: Symbol = Symbol::short("PROP_LIST");
+const SLASHING_CONTRACT: Symbol = Symbol::short("SLASH_CON");
+
+trait SlashingContractClient {
+    fn slash_funds(
+        &self,
+        target: &Address,
+        role: &u32,
+        reason: &u32,
+        amount: &i128,
+    ) -> Result<u64, ContractError>;
+}
+
+impl SlashingContractClient for Address {
+    fn slash_funds(
+        &self,
+        target: &Address,
+        role: &u32,
+        reason: &u32,
+        amount: &i128,
+    ) -> Result<u64, ContractError> {
+        // This is a placeholder implementation
+        // In a real implementation, this would make a cross-contract call
+        Ok(1u64)
+    }
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum ProposalStatus {
@@ -23,6 +48,15 @@ pub enum ProposalStatus {
     Rejected = 2,
     Executed = 3,
     Expired = 4,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum ProposalType {
+    ParameterChange = 0,
+    ContractUpgrade = 1,
+    SlashingAction = 2,
+    TreasuryAllocation = 3,
+    EmergencyAction = 4,
 }
 
 #[contracterror]
@@ -42,6 +76,8 @@ pub enum ContractError {
     ProposalNotActive = 12,
     QuorumNotMet = 13,
     ThresholdNotMet = 14,
+    SlashingContractNotSet = 15,
+    SlashingExecutionFailed = 16,
     InvalidRole = 15,
     RoleNotFound = 16,
     NotTrustedContract = 17,
@@ -112,6 +148,7 @@ impl GovernanceContract {
         voting_period_days: u32,
         min_voting_percentage: u32,
         min_quorum_percentage: u32,
+        slashing_contract: Address,
     ) -> Result<(), ContractError> {
         // Check if already initialized
         if insurance_contracts::authorization::get_admin(&env).is_some() {
@@ -120,6 +157,7 @@ impl GovernanceContract {
 
         validate_address(&env, &admin)?;
         validate_address(&env, &token_contract)?;
+        validate_address(&env, &slashing_contract)?;
 
         if voting_period_days == 0 || voting_period_days > 365 {
             return Err(ContractError::InvalidInput);
@@ -141,6 +179,7 @@ impl GovernanceContract {
             &CONFIG, 
             &(token_contract, voting_period_days, min_voting_percentage, min_quorum_percentage)
         );
+        env.storage().persistent().set(&SLASHING_CONTRACT, &slashing_contract);
         env.storage().persistent().set(&PROPOSAL_COUNTER, &0u64);
         
         env.events().publish(
@@ -421,14 +460,146 @@ impl GovernanceContract {
         Ok(vote_record)
     }
 
-    pub fn get_all_proposals(env: Env) -> Result<Vec<u64>, ContractError> {
-        let proposal_list: Vec<u64> = env
+    pub fn create_slashing_proposal(
+        env: Env,
+        target: Address,
+        role: u32,
+        reason: u32,
+        amount: i128,
+        evidence: Symbol,
+        threshold_percentage: u32,
+    ) -> Result<u64, ContractError> {
+        if is_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+
+        if amount <= 0 {
+            return Err(ContractError::InvalidInput);
+        }
+
+        if threshold_percentage == 0 || threshold_percentage > 100 {
+            return Err(ContractError::InvalidInput);
+        }
+
+        let config: (Address, u32, u32, u32) = env
+            .storage()
+            .persistent()
+            .get(&CONFIG)
+            .ok_or(ContractError::NotInitialized)?;
+
+        let proposer = env.current_contract_address();
+        let proposal_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&PROPOSAL_COUNTER)
+            .unwrap_or(0) + 1;
+        
+        let current_time = env.ledger().timestamp();
+        let voting_end_time = current_time + (86400u64 * config.1 as u64);
+        
+        let proposal = (
+            proposal_id,
+            proposer.clone(),
+            target.clone(),
+            role,
+            reason,
+            amount,
+            evidence.clone(),
+            current_time,
+            voting_end_time,
+            threshold_percentage,
+            ProposalStatus::Active as u32,
+            0i128,
+            0i128,
+            0u32,
+        );
+
+        env.storage()
+            .persistent()
+            .set(&(PROPOSAL, proposal_id), &proposal);
+        
+        env.storage()
+            .persistent()
+            .set(&PROPOSAL_COUNTER, &proposal_id);
+
+        let mut proposal_list: Vec<u64> = env
             .storage()
             .persistent()
             .get(&PROPOSAL_LIST)
             .unwrap_or_else(|| Vec::new(&env));
-        
-        Ok(proposal_list)
+        proposal_list.push_back(proposal_id);
+        env.storage()
+            .persistent()
+            .set(&PROPOSAL_LIST, &proposal_list);
+
+        env.events().publish(
+            (Symbol::new(&env, "slashing_proposal_created"), proposal_id),
+            (target, role, reason, amount, threshold_percentage),
+        );
+
+        Ok(proposal_id)
+    }
+
+    pub fn execute_slashing_proposal(env: Env, proposal_id: u64) -> Result<u64, ContractError> {
+        let mut proposal: (u64, Address, Address, u32, u32, i128, Symbol, u64, u64, u32, u32, i128, i128, u32) = env
+            .storage()
+            .persistent()
+            .get(&(PROPOSAL, proposal_id))
+            .ok_or(ContractError::NotFound)?;
+
+        if proposal.10 != ProposalStatus::Passed as u32 {
+            return Err(ContractError::InvalidState);
+        }
+
+        let slashing_contract: Address = env
+            .storage()
+            .persistent()
+            .get(&SLASHING_CONTRACT)
+            .ok_or(ContractError::SlashingContractNotSet)?;
+
+        proposal.10 = ProposalStatus::Executed as u32;
+
+        env.storage()
+            .persistent()
+            .set(&(PROPOSAL, proposal_id), &proposal);
+
+        let slash_id = Self::execute_slashing(
+            env.clone(),
+            proposal.2, // target
+            proposal.3, // role
+            proposal.4, // reason
+            proposal.5, // amount
+        )?;
+
+        env.events().publish(
+            (Symbol::new(&env, "slashing_proposal_executed"), proposal_id),
+            (slash_id, proposal.2, proposal.3, proposal.4, proposal.5),
+        );
+
+        Ok(slash_id)
+    }
+
+    fn execute_slashing(
+        env: Env,
+        target: Address,
+        role: u32,
+        reason: u32,
+        amount: i128,
+    ) -> Result<u64, ContractError> {
+        let slashing_contract: Address = env
+            .storage()
+            .persistent()
+            .get(&SLASHING_CONTRACT)
+            .ok_or(ContractError::SlashingContractNotSet)?;
+
+        // For now, we'll emit an event and return a mock slash ID
+        // In a real implementation, this would make a cross-contract call
+        env.events().publish(
+            (Symbol::new(&env, "slashing_executed"), 0u64),
+            (target, role, reason, amount),
+        );
+
+        Ok(1u64)
     }
 
     pub fn get_active_proposals(env: Env) -> Result<Vec<u64>, ContractError> {
