@@ -4,8 +4,6 @@
 //! This module contains common types, utilities, and error handling
 //! used across all insurance contracts in the Stellar Insured ecosystem.
 
-#![no_std]
-
 use soroban_sdk::{contracttype, Address, Env, Symbol, String, BytesN};
 
 /// Re-export authorization module for easy access
@@ -112,8 +110,13 @@ pub mod errors {
         RoleNotFound = 12,
         /// Contract not trusted for cross-contract calls
         NotTrustedContract = 13,
+
+        /// 🔐 Evidence-specific errors
+        EvidenceAlreadyExists = 20,
+        EvidenceNotFound = 21,
+        InvalidEvidenceHash = 22,
     }
-    
+
     /// Convert authorization errors to contract errors
     impl From<super::authorization::AuthError> for ContractError {
         fn from(err: super::authorization::AuthError) -> Self {
@@ -124,11 +127,6 @@ pub mod errors {
                 super::authorization::AuthError::NotTrustedContract => ContractError::NotTrustedContract,
             }
         }
-
-        /// 🔐 Evidence-specific errors
-        EvidenceAlreadyExists = 20,
-        EvidenceNotFound = 21,
-        InvalidEvidenceHash = 22,
     }
 }
 

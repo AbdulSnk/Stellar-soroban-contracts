@@ -7,11 +7,14 @@ publish = false
 [lib]
 name = "oracle_contract"
 crate-type = ["cdylib"]
-path = "lib.rs"
+path = "src/lib.rs"
 
 [dependencies]
 soroban-sdk = { workspace = true }
 soroban-sdk-macros = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
 
 [profile.release]
 opt-level = "z"

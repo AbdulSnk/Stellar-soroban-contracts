@@ -5,6 +5,7 @@ members = [
     "contracts",
     "contracts/authorization",
     "contracts/shared",
+    "contracts/invariants",
     "contracts/policy",
     "contracts/claims",
     "contracts/risk_pool",
