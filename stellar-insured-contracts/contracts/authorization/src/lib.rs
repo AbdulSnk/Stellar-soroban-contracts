@@ -42,6 +42,11 @@ pub enum RoleKey {
     ContractAdmin,
     /// Trusted contract addresses for cross-contract calls
     TrustedContract(Address),
+
+    /// NEW: Minimum signatures required for a Role
+    Threshold(Role),
+    /// NEW: Maps a unique action hash to a list of addresses that approved it
+    Approvals(soroban_sdk::BytesN<32>),
 }
 
 /// Authorization errors
@@ -90,31 +95,28 @@ impl Role {
 
 /// Initialize contract admin (call once during contract initialization)
 pub fn initialize_admin(env: &Env, admin: Address) {
-    env.storage()
-        .persistent()
-        .set(&RoleKey::ContractAdmin, &admin);
-    env.storage()
-        .persistent()
-        .set(&RoleKey::UserRole(admin.clone()), &Role::Admin);
+    env.storage().persistent().set(&RoleKey::ContractAdmin, &admin);
+    env.storage().persistent().set(&RoleKey::UserRole(admin.clone()), &Role::Admin);
 }
 
 /// Get the contract admin address
 pub fn get_admin(env: &Env) -> Option<Address> {
-    env.storage()
-        .persistent()
-        .get(&RoleKey::ContractAdmin)
+    env.storage().persistent().get(&RoleKey::ContractAdmin)
 }
 
 /// Grant a role to an address (admin only)
-pub fn grant_role(env: &Env, caller: &Address, target: &Address, role: Role) -> Result<(), AuthError> {
+pub fn grant_role(
+    env: &Env,
+    caller: &Address,
+    target: &Address,
+    role: Role,
+) -> Result<(), AuthError> {
     // Verify caller is admin
     require_role(env, caller, Role::Admin)?;
-    
+
     // Grant the role
-    env.storage()
-        .persistent()
-        .set(&RoleKey::UserRole(target.clone()), &role);
-    
+    env.storage().persistent().set(&RoleKey::UserRole(target.clone()), &role);
+
     Ok(())
 }
 
@@ -122,17 +124,15 @@ pub fn grant_role(env: &Env, caller: &Address, target: &Address, role: Role) -> 
 pub fn revoke_role(env: &Env, caller: &Address, target: &Address) -> Result<(), AuthError> {
     // Verify caller is admin
     require_role(env, caller, Role::Admin)?;
-    
+
     // Prevent admin from revoking their own role (safeguard)
     if caller == target {
         return Err(AuthError::Unauthorized);
     }
-    
+
     // Revoke by setting to User role (lowest privilege)
-    env.storage()
-        .persistent()
-        .set(&RoleKey::UserRole(target.clone()), &Role::User);
-    
+    env.storage().persistent().set(&RoleKey::UserRole(target.clone()), &Role::User);
+
     Ok(())
 }
 
@@ -153,7 +153,7 @@ pub fn has_role(env: &Env, address: &Address, required_role: Role) -> bool {
 /// Require that the caller has a specific role (throws error if not)
 pub fn require_role(env: &Env, address: &Address, required_role: Role) -> Result<(), AuthError> {
     let user_role = get_role(env, address);
-    
+
     if user_role == required_role {
         Ok(())
     } else {
@@ -226,24 +226,32 @@ pub fn require_governance_permission(env: &Env, address: &Address) -> Result<(),
 /// Cross-contract call validation
 
 /// Register a trusted contract address (admin only)
-pub fn register_trusted_contract(env: &Env, caller: &Address, contract_address: &Address) -> Result<(), AuthError> {
+pub fn register_trusted_contract(
+    env: &Env,
+    caller: &Address,
+    contract_address: &Address,
+) -> Result<(), AuthError> {
     require_admin(env, caller)?;
-    
+
     env.storage()
         .persistent()
         .set(&RoleKey::TrustedContract(contract_address.clone()), &true);
-    
+
     Ok(())
 }
 
 /// Unregister a trusted contract address (admin only)
-pub fn unregister_trusted_contract(env: &Env, caller: &Address, contract_address: &Address) -> Result<(), AuthError> {
+pub fn unregister_trusted_contract(
+    env: &Env,
+    caller: &Address,
+    contract_address: &Address,
+) -> Result<(), AuthError> {
     require_admin(env, caller)?;
-    
+
     env.storage()
         .persistent()
         .remove(&RoleKey::TrustedContract(contract_address.clone()));
-    
+
     Ok(())
 }
 
@@ -266,25 +274,120 @@ pub fn require_trusted_contract(env: &Env, contract_address: &Address) -> Result
 
 /// Utility: Combine identity verification with role check
 /// This is the recommended pattern for most privileged operations
-pub fn verify_and_require_role(env: &Env, caller: &Address, required_role: Role) -> Result<(), AuthError> {
+pub fn verify_and_require_role(
+    env: &Env,
+    caller: &Address,
+    required_role: Role,
+) -> Result<(), AuthError> {
     // First, verify the caller's identity (Soroban's built-in auth)
     caller.require_auth();
-    
+
     // Then, check if they have the required role
     require_role(env, caller, required_role)
 }
 
 /// Utility: Verify identity and check permission
-pub fn verify_and_check_permission<F>(env: &Env, caller: &Address, permission_check: F) -> Result<(), AuthError>
+pub fn verify_and_check_permission<F>(
+    env: &Env,
+    caller: &Address,
+    permission_check: F,
+) -> Result<(), AuthError>
 where
     F: Fn(&Role) -> bool,
 {
     caller.require_auth();
-    
+
     let role = get_role(env, caller);
     if permission_check(&role) {
         Ok(())
     } else {
         Err(AuthError::Unauthorized)
     }
+}
+
+/// Returns the current threshold for a role.
+pub fn get_threshold(env: &Env, role: Role) -> u32 {
+    env.storage().persistent().get(&RoleKey::Threshold(role)).unwrap_or(1) // Default to 1 (standard single-sig)
+}
+
+/// Returns the list of addresses that have already signed a specific action.
+/// Useful for frontends to show "2 of 3 signed".
+pub fn get_approvals(env: &Env, action_hash: soroban_sdk::BytesN<32>) -> soroban_sdk::Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&RoleKey::Approvals(action_hash))
+        .unwrap_or(soroban_sdk::Vec::new(env))
+}
+/// Core Multi-Sig Logic with Event Logging
+pub fn check_multisig_auth(
+    env: &Env,
+    caller: &Address,
+    action_hash: soroban_sdk::BytesN<32>,
+    required_role: Role,
+) -> Result<bool, AuthError> {
+    caller.require_auth();
+    require_role(env, caller, required_role.clone())?;
+
+    let threshold: u32 = env
+        .storage()
+        .persistent()
+        .get(&RoleKey::Threshold(required_role.clone()))
+        .unwrap_or(1);
+
+    if threshold <= 1 {
+        return Ok(true);
+    }
+
+    let mut approvals: soroban_sdk::Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&RoleKey::Approvals(action_hash.clone()))
+        .unwrap_or(soroban_sdk::Vec::new(env));
+
+    if !approvals.contains(caller) {
+        approvals.push_back(caller.clone());
+        env.storage()
+            .persistent()
+            .set(&RoleKey::Approvals(action_hash.clone()), &approvals);
+
+        // --- EVENT 1: SIGNATURE ADDED ---
+        // Helps UIs show "New signature from [Address]"
+        env.events().publish(
+            (soroban_sdk::Symbol::new(env, "msig_signed"), action_hash.clone()),
+            (caller.clone(), approvals.len(), threshold),
+        );
+    }
+
+    if approvals.len() >= threshold {
+        // --- EVENT 2: THRESHOLD REACHED ---
+        // Signals that the next call will execute the logic
+        env.events().publish(
+            (soroban_sdk::Symbol::new(env, "msig_filled"), action_hash.clone()),
+            required_role,
+        );
+
+        env.storage().persistent().remove(&RoleKey::Approvals(action_hash));
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Admin Event for Threshold Changes
+pub fn set_threshold(
+    env: &Env,
+    admin: Address,
+    role: Role,
+    threshold: u32,
+) -> Result<(), AuthError> {
+    admin.require_auth();
+    require_admin(env, &admin)?;
+
+    env.storage().persistent().set(&RoleKey::Threshold(role.clone()), &threshold);
+
+    // --- EVENT 3: CONFIG CHANGE ---
+    env.events()
+        .publish((soroban_sdk::Symbol::new(env, "msig_thresh_set"), role), threshold);
+
+    Ok(())
 }

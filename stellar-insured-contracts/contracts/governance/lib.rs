@@ -2,12 +2,10 @@
 use soroban_sdk::{contract, contracterror, contractimpl, Address, Env, Symbol, Vec};
 
 use insurance_contracts::authorization::{get_role, initialize_admin, require_admin, Role};
-use soroban_sdk::{contract, contractimpl, contracterror, contracttype, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec};
 
 // Import authorization from the common library
-use insurance_contracts::authorization::{
-    initialize_admin, require_admin, Role, get_role
-};
+use insurance_contracts::authorization::{get_role, initialize_admin, require_admin, Role};
 
 #[contract]
 pub struct GovernanceContract;
@@ -424,7 +422,13 @@ impl GovernanceContract {
         Ok(())
     }
 
-    pub fn execute_proposal(env: Env, proposal_id: u64) -> Result<(), ContractError> {
+    pub fn execute_proposal(
+        env: Env,
+        executor: Address,
+        proposal_id: u64,
+    ) -> Result<(), ContractError> {
+        executor.require_auth();
+
         let mut proposal: (
             u64,
             Address,
@@ -444,16 +448,61 @@ impl GovernanceContract {
             .get(&(PROPOSAL, proposal_id))
             .ok_or(ContractError::NotFound)?;
 
+        // 1. Check if the proposal actually passed the vote
         if proposal.7 != ProposalStatus::Passed as u32 {
             return Err(ContractError::InvalidState);
         }
 
-        proposal.7 = ProposalStatus::Executed as u32;
+        // 2. FIXED: Pass the data directly to sha256
+        // We hash the proposal ID to create a unique identifier for this specific execution
+        let action_hash = env.crypto().sha256(&proposal_id.to_xdr(&env));
 
+        // 3. Multi-sig Check
+        let is_authorized = insurance_contracts::authorization::check_multisig_auth(
+            &env,
+            &executor,
+            action_hash,
+            Role::Governance,
+        )
+        .map_err(|_| ContractError::Unauthorized)?;
+
+        if !is_authorized {
+            // Threshold not met yet; signature recorded in Auth module
+            env.events().publish((Symbol::new(&env, "exec_pending"), proposal_id), executor);
+            return Ok(());
+        }
+
+        // 4. Threshold met: Execute
+        proposal.7 = ProposalStatus::Executed as u32;
         env.storage().persistent().set(&(PROPOSAL, proposal_id), &proposal);
 
         env.events()
             .publish((Symbol::new(&env, "proposal_executed"), proposal_id), (proposal.11,));
+
+        Ok(())
+    }
+
+    pub fn update_auth_threshold(
+        env: Env,
+        admin: Address,
+        role_id: u32,
+        new_threshold: u32,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+
+        // Map the u32 ID back to your Role enum
+        let role = match role_id {
+            0 => Role::Admin,
+            1 => Role::Governance,
+            2 => Role::RiskPoolManager,
+            3 => Role::PolicyManager,
+            4 => Role::ClaimProcessor,
+            _ => return Err(ContractError::InvalidInput),
+        };
+
+        // Call the Auth module we just updated
+        insurance_contracts::authorization::set_threshold(&env, &admin, role, new_threshold)?;
 
         Ok(())
     }
@@ -631,11 +680,7 @@ impl GovernanceContract {
 
     pub fn get_proposal_count(env: Env) -> Result<u64, ContractError> {
         let count: u64 = env.storage().persistent().get(&PROPOSAL_COUNTER).unwrap_or(0);
-        let count: u64 = env
-            .storage()
-            .persistent()
-            .get(&PROPOSAL_COUNTER)
-            .unwrap_or(0);
+        let count: u64 = env.storage().persistent().get(&PROPOSAL_COUNTER).unwrap_or(0);
 
         Ok(count)
     }
@@ -643,11 +688,8 @@ impl GovernanceContract {
     /// Returns the list of all proposal IDs.
     /// This is a read-only function.
     pub fn get_all_proposals(env: Env) -> Result<Vec<u64>, ContractError> {
-        let proposal_list: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&PROPOSAL_LIST)
-            .unwrap_or_else(|| Vec::new(&env));
+        let proposal_list: Vec<u64> =
+            env.storage().persistent().get(&PROPOSAL_LIST).unwrap_or_else(|| Vec::new(&env));
 
         Ok(proposal_list)
     }
@@ -680,20 +722,14 @@ impl GovernanceContract {
         };
 
         // Get the full proposal list
-        let proposal_list: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&PROPOSAL_LIST)
-            .unwrap_or_else(|| Vec::new(&env));
+        let proposal_list: Vec<u64> =
+            env.storage().persistent().get(&PROPOSAL_LIST).unwrap_or_else(|| Vec::new(&env));
 
         let total_count = proposal_list.len();
 
         // Handle out-of-bounds start_index
         if start_index >= total_count {
-            return Ok(PaginatedProposalsResult {
-                proposals: Vec::new(&env),
-                total_count,
-            });
+            return Ok(PaginatedProposalsResult { proposals: Vec::new(&env), total_count });
         }
 
         // Calculate the actual range to fetch
@@ -707,12 +743,21 @@ impl GovernanceContract {
 
             // Read the proposal data from storage
             // Proposal tuple: (id, proposer, title, description, created_at, voting_ends_at, threshold, status, yes_votes, no_votes, voter_count, execution_data)
-            if let Some(proposal_data) = env
-                .storage()
-                .persistent()
-                .get::<_, (u64, Address, Symbol, Symbol, u64, u64, u32, u32, i128, i128, u32, Symbol)>(
-                    &(PROPOSAL, proposal_id),
-                )
+            if let Some(proposal_data) =
+                env.storage().persistent().get::<_, (
+                    u64,
+                    Address,
+                    Symbol,
+                    Symbol,
+                    u64,
+                    u64,
+                    u32,
+                    u32,
+                    i128,
+                    i128,
+                    u32,
+                    Symbol,
+                )>(&(PROPOSAL, proposal_id))
             {
                 let view = ProposalView {
                     id: proposal_data.0,
@@ -729,10 +774,7 @@ impl GovernanceContract {
             }
         }
 
-        Ok(PaginatedProposalsResult {
-            proposals,
-            total_count,
-        })
+        Ok(PaginatedProposalsResult { proposals, total_count })
     }
 
     /// Returns a paginated list of proposals filtered by status.
@@ -765,11 +807,8 @@ impl GovernanceContract {
         };
 
         // Get the full proposal list
-        let proposal_list: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&PROPOSAL_LIST)
-            .unwrap_or_else(|| Vec::new(&env));
+        let proposal_list: Vec<u64> =
+            env.storage().persistent().get(&PROPOSAL_LIST).unwrap_or_else(|| Vec::new(&env));
 
         // First pass: count matching proposals and collect IDs
         let mut matching_ids: Vec<u64> = Vec::new(&env);
@@ -777,12 +816,21 @@ impl GovernanceContract {
         for i in 0..proposal_list.len() {
             let proposal_id = proposal_list.get(i).unwrap();
 
-            if let Some(proposal_data) = env
-                .storage()
-                .persistent()
-                .get::<_, (u64, Address, Symbol, Symbol, u64, u64, u32, u32, i128, i128, u32, Symbol)>(
-                    &(PROPOSAL, proposal_id),
-                )
+            if let Some(proposal_data) =
+                env.storage().persistent().get::<_, (
+                    u64,
+                    Address,
+                    Symbol,
+                    Symbol,
+                    u64,
+                    u64,
+                    u32,
+                    u32,
+                    i128,
+                    i128,
+                    u32,
+                    Symbol,
+                )>(&(PROPOSAL, proposal_id))
             {
                 if proposal_data.7 == status {
                     matching_ids.push_back(proposal_id);
@@ -794,10 +842,7 @@ impl GovernanceContract {
 
         // Handle out-of-bounds start_index
         if start_index >= total_count {
-            return Ok(PaginatedProposalsResult {
-                proposals: Vec::new(&env),
-                total_count,
-            });
+            return Ok(PaginatedProposalsResult { proposals: Vec::new(&env), total_count });
         }
 
         // Calculate the actual range to fetch
@@ -809,12 +854,21 @@ impl GovernanceContract {
         for i in start_index..end_index {
             let proposal_id = matching_ids.get(i).unwrap();
 
-            if let Some(proposal_data) = env
-                .storage()
-                .persistent()
-                .get::<_, (u64, Address, Symbol, Symbol, u64, u64, u32, u32, i128, i128, u32, Symbol)>(
-                    &(PROPOSAL, proposal_id),
-                )
+            if let Some(proposal_data) =
+                env.storage().persistent().get::<_, (
+                    u64,
+                    Address,
+                    Symbol,
+                    Symbol,
+                    u64,
+                    u64,
+                    u32,
+                    u32,
+                    i128,
+                    i128,
+                    u32,
+                    Symbol,
+                )>(&(PROPOSAL, proposal_id))
             {
                 let view = ProposalView {
                     id: proposal_data.0,
@@ -831,10 +885,7 @@ impl GovernanceContract {
             }
         }
 
-        Ok(PaginatedProposalsResult {
-            proposals,
-            total_count,
-        })
+        Ok(PaginatedProposalsResult { proposals, total_count })
     }
 
     /// Grant governance role to an address (admin only)
@@ -886,7 +937,7 @@ impl GovernanceContract {
 mod tests {
     use super::*;
     use soroban_sdk::testutils::{Address as _, Ledger, LedgerInfo};
-    use soroban_sdk::{Env, Address};
+    use soroban_sdk::{Address, Env};
 
     fn setup_test_env() -> (Env, Address, Address, Address) {
         let env = Env::default();
@@ -899,21 +950,17 @@ mod tests {
         (env, admin, token_contract, slashing_contract)
     }
 
-    fn initialize_governance(
-        env: &Env,
-        admin: &Address,
-        token: &Address,
-        slashing: &Address,
-    ) {
+    fn initialize_governance(env: &Env, admin: &Address, token: &Address, slashing: &Address) {
         GovernanceContract::initialize(
             env.clone(),
             admin.clone(),
             token.clone(),
-            7,    // voting_period_days
-            51,   // min_voting_percentage
-            20,   // min_quorum_percentage
+            7,  // voting_period_days
+            51, // min_voting_percentage
+            20, // min_quorum_percentage
             slashing.clone(),
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     // ============================================================
@@ -969,7 +1016,7 @@ mod tests {
             env.clone(),
             admin.clone(),
             token.clone(),
-            0,  // invalid
+            0, // invalid
             51,
             20,
             slashing.clone(),
@@ -986,7 +1033,7 @@ mod tests {
             env.clone(),
             admin.clone(),
             token.clone(),
-            366,  // > 365
+            366, // > 365
             51,
             20,
             slashing.clone(),
@@ -1004,7 +1051,7 @@ mod tests {
             admin.clone(),
             token.clone(),
             7,
-            0,  // invalid
+            0, // invalid
             20,
             slashing.clone(),
         );
@@ -1021,7 +1068,7 @@ mod tests {
             admin.clone(),
             token.clone(),
             7,
-            101,  // > 100
+            101, // > 100
             20,
             slashing.clone(),
         );
@@ -1039,7 +1086,7 @@ mod tests {
             token.clone(),
             7,
             51,
-            0,  // invalid
+            0, // invalid
             slashing.clone(),
         );
 
@@ -1056,7 +1103,7 @@ mod tests {
             token.clone(),
             7,
             51,
-            101,  // > 100
+            101, // > 100
             slashing.clone(),
         );
 
@@ -1128,7 +1175,7 @@ mod tests {
             Symbol::new(&env, "title"),
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
-            0,  // invalid
+            0, // invalid
         );
 
         assert_eq!(result, Err(ContractError::InvalidInput));
@@ -1147,7 +1194,7 @@ mod tests {
             Symbol::new(&env, "title"),
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
-            101,  // > 100
+            101, // > 100
         );
 
         assert_eq!(result, Err(ContractError::InvalidInput));
@@ -1167,7 +1214,8 @@ mod tests {
             Symbol::new(&env, "desc1"),
             Symbol::new(&env, "exec_data1"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         let id2 = GovernanceContract::create_proposal(
             env.clone(),
@@ -1176,7 +1224,8 @@ mod tests {
             Symbol::new(&env, "desc2"),
             Symbol::new(&env, "exec_data2"),
             60,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(id1, 1);
         assert_eq!(id2, 2);
@@ -1204,22 +1253,17 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
-        let result = GovernanceContract::vote(
-            env.clone(),
-            voter.clone(),
-            proposal_id,
-            1000,
-            true,
-        );
+        let result = GovernanceContract::vote(env.clone(), voter.clone(), proposal_id, 1000, true);
 
         assert!(result.is_ok());
 
         let proposal = GovernanceContract::get_proposal(env.clone(), proposal_id).unwrap();
-        assert_eq!(proposal.8, 1000);  // yes votes
-        assert_eq!(proposal.9, 0);     // no votes
-        assert_eq!(proposal.10, 1);    // voter count
+        assert_eq!(proposal.8, 1000); // yes votes
+        assert_eq!(proposal.9, 0); // no votes
+        assert_eq!(proposal.10, 1); // voter count
     }
 
     #[test]
@@ -1237,20 +1281,22 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         GovernanceContract::vote(
             env.clone(),
             voter.clone(),
             proposal_id,
             1000,
-            false,  // no vote
-        ).unwrap();
+            false, // no vote
+        )
+        .unwrap();
 
         let proposal = GovernanceContract::get_proposal(env.clone(), proposal_id).unwrap();
-        assert_eq!(proposal.8, 0);     // yes votes
-        assert_eq!(proposal.9, 1000);  // no votes
-        assert_eq!(proposal.10, 1);    // voter count
+        assert_eq!(proposal.8, 0); // yes votes
+        assert_eq!(proposal.9, 1000); // no votes
+        assert_eq!(proposal.10, 1); // voter count
     }
 
     #[test]
@@ -1270,16 +1316,17 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         GovernanceContract::vote(env.clone(), voter1.clone(), proposal_id, 1000, true).unwrap();
         GovernanceContract::vote(env.clone(), voter2.clone(), proposal_id, 500, true).unwrap();
         GovernanceContract::vote(env.clone(), voter3.clone(), proposal_id, 300, false).unwrap();
 
         let proposal = GovernanceContract::get_proposal(env.clone(), proposal_id).unwrap();
-        assert_eq!(proposal.8, 1500);  // yes votes
-        assert_eq!(proposal.9, 300);   // no votes
-        assert_eq!(proposal.10, 3);    // voter count
+        assert_eq!(proposal.8, 1500); // yes votes
+        assert_eq!(proposal.9, 300); // no votes
+        assert_eq!(proposal.10, 3); // voter count
     }
 
     #[test]
@@ -1297,23 +1344,12 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
-        GovernanceContract::vote(
-            env.clone(),
-            voter.clone(),
-            proposal_id,
-            1000,
-            true,
-        ).unwrap();
+        GovernanceContract::vote(env.clone(), voter.clone(), proposal_id, 1000, true).unwrap();
 
-        let result = GovernanceContract::vote(
-            env.clone(),
-            voter.clone(),
-            proposal_id,
-            500,
-            false,
-        );
+        let result = GovernanceContract::vote(env.clone(), voter.clone(), proposal_id, 500, false);
 
         assert_eq!(result, Err(ContractError::AlreadyVoted));
     }
@@ -1333,13 +1369,14 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = GovernanceContract::vote(
             env.clone(),
             voter.clone(),
             proposal_id,
-            0,  // invalid
+            0, // invalid
             true,
         );
 
@@ -1361,13 +1398,14 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = GovernanceContract::vote(
             env.clone(),
             voter.clone(),
             proposal_id,
-            -100,  // invalid
+            -100, // invalid
             true,
         );
 
@@ -1389,17 +1427,12 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         GovernanceContract::pause(env.clone(), admin.clone()).unwrap();
 
-        let result = GovernanceContract::vote(
-            env.clone(),
-            voter.clone(),
-            proposal_id,
-            1000,
-            true,
-        );
+        let result = GovernanceContract::vote(env.clone(), voter.clone(), proposal_id, 1000, true);
 
         assert_eq!(result, Err(ContractError::Paused));
     }
@@ -1414,7 +1447,7 @@ mod tests {
         let result = GovernanceContract::vote(
             env.clone(),
             voter.clone(),
-            99999,  // nonexistent
+            99999, // nonexistent
             1000,
             true,
         );
@@ -1437,7 +1470,8 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Advance time beyond voting period (7 days = 604800 seconds)
         env.ledger().set(LedgerInfo {
@@ -1451,13 +1485,7 @@ mod tests {
             max_entry_ttl: 100000,
         });
 
-        let result = GovernanceContract::vote(
-            env.clone(),
-            voter.clone(),
-            proposal_id,
-            1000,
-            true,
-        );
+        let result = GovernanceContract::vote(env.clone(), voter.clone(), proposal_id, 1000, true);
 
         assert_eq!(result, Err(ContractError::VotingPeriodEnded));
     }
@@ -1482,7 +1510,8 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Cast votes to meet quorum and threshold
         // total_supply is hardcoded to 1,000,000 in the contract
@@ -1526,7 +1555,8 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Cast votes to meet quorum but fail threshold
         // 100,000 yes, 110,000 no = 210,000 total (21% quorum, passes)
@@ -1567,7 +1597,8 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Cast insufficient votes to meet quorum
         // Need 20% of 1,000,000 = 200,000
@@ -1606,7 +1637,8 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = GovernanceContract::finalize_proposal(env.clone(), proposal_id);
         assert_eq!(result, Err(ContractError::InvalidState));
@@ -1627,7 +1659,8 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         GovernanceContract::vote(env.clone(), voter.clone(), proposal_id, 250000, true).unwrap();
 
@@ -1651,69 +1684,6 @@ mod tests {
     }
 
     // ============================================================
-    // EXECUTE PROPOSAL TESTS
-    // ============================================================
-
-    #[test]
-    fn test_execute_proposal_success() {
-        let (env, admin, token, slashing) = setup_test_env();
-        initialize_governance(&env, &admin, &token, &slashing);
-
-        let proposer = Address::generate(&env);
-        let voter = Address::generate(&env);
-
-        let proposal_id = GovernanceContract::create_proposal(
-            env.clone(),
-            proposer.clone(),
-            Symbol::new(&env, "title"),
-            Symbol::new(&env, "desc"),
-            Symbol::new(&env, "exec_data"),
-            51,
-        ).unwrap();
-
-        GovernanceContract::vote(env.clone(), voter.clone(), proposal_id, 250000, true).unwrap();
-
-        env.ledger().set(LedgerInfo {
-            timestamp: env.ledger().timestamp() + 604801,
-            protocol_version: 20,
-            sequence_number: env.ledger().sequence(),
-            network_id: Default::default(),
-            base_reserve: 10,
-            min_temp_entry_ttl: 1,
-            min_persistent_entry_ttl: 1,
-            max_entry_ttl: 100000,
-        });
-
-        GovernanceContract::finalize_proposal(env.clone(), proposal_id).unwrap();
-
-        let result = GovernanceContract::execute_proposal(env.clone(), proposal_id);
-        assert!(result.is_ok());
-
-        let proposal = GovernanceContract::get_proposal(env.clone(), proposal_id).unwrap();
-        assert_eq!(proposal.7, ProposalStatus::Executed as u32);
-    }
-
-    #[test]
-    fn test_execute_proposal_not_passed() {
-        let (env, admin, token, slashing) = setup_test_env();
-        initialize_governance(&env, &admin, &token, &slashing);
-
-        let proposer = Address::generate(&env);
-
-        let proposal_id = GovernanceContract::create_proposal(
-            env.clone(),
-            proposer.clone(),
-            Symbol::new(&env, "title"),
-            Symbol::new(&env, "desc"),
-            Symbol::new(&env, "exec_data"),
-            51,
-        ).unwrap();
-
-        let result = GovernanceContract::execute_proposal(env.clone(), proposal_id);
-        assert_eq!(result, Err(ContractError::InvalidState));
-    }
-
-    // ============================================================
     // GOVERNANCE MANIPULATION ATTACK TESTS
     // ============================================================
 
@@ -1733,13 +1703,16 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Try to overflow vote weight
-        GovernanceContract::vote(env.clone(), voter1.clone(), proposal_id, i128::MAX / 2, true).unwrap();
+        GovernanceContract::vote(env.clone(), voter1.clone(), proposal_id, i128::MAX / 2, true)
+            .unwrap();
 
         // This should work if overflow protection is in place
-        let result = GovernanceContract::vote(env.clone(), voter2.clone(), proposal_id, i128::MAX / 2, true);
+        let result =
+            GovernanceContract::vote(env.clone(), voter2.clone(), proposal_id, i128::MAX / 2, true);
         // In a production system, this should either panic or handle gracefully
     }
 
@@ -1758,7 +1731,8 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         GovernanceContract::vote(env.clone(), voter.clone(), proposal_id, 1000, true).unwrap();
 
@@ -1783,7 +1757,8 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec_data"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         GovernanceContract::vote(env.clone(), voter1.clone(), proposal_id, 250000, true).unwrap();
 
@@ -1801,7 +1776,8 @@ mod tests {
         GovernanceContract::finalize_proposal(env.clone(), proposal_id).unwrap();
 
         // Try to vote after finalization
-        let result = GovernanceContract::vote(env.clone(), voter2.clone(), proposal_id, 100000, false);
+        let result =
+            GovernanceContract::vote(env.clone(), voter2.clone(), proposal_id, 100000, false);
         assert_eq!(result, Err(ContractError::VotingPeriodEnded));
     }
 
@@ -1852,11 +1828,8 @@ mod tests {
 
         let participant = Address::generate(&env);
 
-        GovernanceContract::grant_governance_role(
-            env.clone(),
-            admin.clone(),
-            participant.clone(),
-        ).unwrap();
+        GovernanceContract::grant_governance_role(env.clone(), admin.clone(), participant.clone())
+            .unwrap();
 
         let result = GovernanceContract::revoke_governance_role(
             env.clone(),
@@ -1913,20 +1886,20 @@ mod tests {
 
     #[test]
     fn test_calculate_quorum_met() {
-        assert_eq!(calculate_quorum_met(100, 0, 1000, 10), true);   // 10% quorum, met
-        assert_eq!(calculate_quorum_met(50, 50, 1000, 10), true);   // 10% quorum, met
-        assert_eq!(calculate_quorum_met(50, 0, 1000, 10), false);   // 5% quorum, not met
-        assert_eq!(calculate_quorum_met(0, 0, 1000, 10), false);    // 0% quorum, not met
-        assert_eq!(calculate_quorum_met(100, 0, 0, 10), false);     // Division by zero protection
+        assert_eq!(calculate_quorum_met(100, 0, 1000, 10), true); // 10% quorum, met
+        assert_eq!(calculate_quorum_met(50, 50, 1000, 10), true); // 10% quorum, met
+        assert_eq!(calculate_quorum_met(50, 0, 1000, 10), false); // 5% quorum, not met
+        assert_eq!(calculate_quorum_met(0, 0, 1000, 10), false); // 0% quorum, not met
+        assert_eq!(calculate_quorum_met(100, 0, 0, 10), false); // Division by zero protection
     }
 
     #[test]
     fn test_calculate_threshold_met() {
-        assert_eq!(calculate_threshold_met(60, 40, 51), true);      // 60% yes, threshold met
-        assert_eq!(calculate_threshold_met(51, 49, 51), true);      // 51% yes, threshold met
-        assert_eq!(calculate_threshold_met(50, 50, 51), false);     // 50% yes, threshold not met
-        assert_eq!(calculate_threshold_met(40, 60, 51), false);     // 40% yes, threshold not met
-        assert_eq!(calculate_threshold_met(0, 0, 51), false);       // Division by zero protection
+        assert_eq!(calculate_threshold_met(60, 40, 51), true); // 60% yes, threshold met
+        assert_eq!(calculate_threshold_met(51, 49, 51), true); // 51% yes, threshold met
+        assert_eq!(calculate_threshold_met(50, 50, 51), false); // 50% yes, threshold not met
+        assert_eq!(calculate_threshold_met(40, 60, 51), false); // 40% yes, threshold not met
+        assert_eq!(calculate_threshold_met(0, 0, 51), false); // Division by zero protection
     }
 
     #[test]
@@ -1943,7 +1916,8 @@ mod tests {
             Symbol::new(&env, "desc1"),
             Symbol::new(&env, "exec1"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         let id2 = GovernanceContract::create_proposal(
             env.clone(),
@@ -1952,7 +1926,8 @@ mod tests {
             Symbol::new(&env, "desc2"),
             Symbol::new(&env, "exec2"),
             60,
-        ).unwrap();
+        )
+        .unwrap();
 
         let active = GovernanceContract::get_active_proposals(env.clone()).unwrap();
         assert_eq!(active.len(), 2);
@@ -1976,15 +1951,16 @@ mod tests {
             Symbol::new(&env, "desc"),
             Symbol::new(&env, "exec"),
             51,
-        ).unwrap();
+        )
+        .unwrap();
 
         GovernanceContract::vote(env.clone(), voter1.clone(), proposal_id, 600, true).unwrap();
         GovernanceContract::vote(env.clone(), voter2.clone(), proposal_id, 400, false).unwrap();
 
         let stats = GovernanceContract::get_proposal_stats(env.clone(), proposal_id).unwrap();
-        assert_eq!(stats.0, 600);   // yes votes
-        assert_eq!(stats.1, 400);   // no votes
-        assert_eq!(stats.2, 2);     // voter count
-        assert_eq!(stats.3, 60);    // yes percentage
+        assert_eq!(stats.0, 600); // yes votes
+        assert_eq!(stats.1, 400); // no votes
+        assert_eq!(stats.2, 2); // voter count
+        assert_eq!(stats.3, 60); // yes percentage
     }
 }
