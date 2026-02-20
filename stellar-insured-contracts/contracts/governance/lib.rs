@@ -2,6 +2,7 @@
 use soroban_sdk::{contract, contracterror, contractimpl, Address, Env, Symbol, Vec};
 
 use insurance_contracts::authorization::{get_role, initialize_admin, require_admin, Role};
+use insurance_contracts::rate_limit::{self, RateLimitConfig};
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Symbol, Vec};
 
 // Import authorization from the common library
@@ -19,6 +20,9 @@ const VOTER: Symbol = Symbol::short("VOTER");
 const PROPOSAL_LIST: Symbol = Symbol::short("PROP_LIST");
 const SLASHING_CONTRACT: Symbol = Symbol::short("SLASHING");
 const SLASHING_CONTRACT: Symbol = Symbol::short("SLASH_C");
+const GOVERNANCE_VOTE_SCOPE: &str = "governance_vote";
+const DEFAULT_GOVERNANCE_VOTE_RATE_LIMIT_MAX_CALLS: u32 = 10;
+const DEFAULT_GOVERNANCE_VOTE_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum ProposalStatus {
@@ -60,6 +64,8 @@ pub enum ContractError {
     InvalidRole = 17,
     RoleNotFound = 18,
     NotTrustedContract = 19,
+    RateLimitExceeded = 20,
+    InvalidRateLimitConfig = 21,
 }
 
 impl From<insurance_contracts::authorization::AuthError> for ContractError {
@@ -76,6 +82,19 @@ impl From<insurance_contracts::authorization::AuthError> for ContractError {
             }
             insurance_contracts::authorization::AuthError::NotTrustedContract => {
                 ContractError::NotTrustedContract
+            }
+        }
+    }
+}
+
+impl From<insurance_contracts::rate_limit::RateLimitError> for ContractError {
+    fn from(err: insurance_contracts::rate_limit::RateLimitError) -> Self {
+        match err {
+            insurance_contracts::rate_limit::RateLimitError::Exceeded => {
+                ContractError::RateLimitExceeded
+            }
+            insurance_contracts::rate_limit::RateLimitError::InvalidConfig => {
+                ContractError::InvalidRateLimitConfig
             }
         }
     }
@@ -211,6 +230,27 @@ impl GovernanceContract {
         Ok(())
     }
 
+    pub fn set_vote_rate_limit(
+        env: Env,
+        admin: Address,
+        max_calls: u32,
+        window_secs: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+
+        rate_limit::set_config(
+            &env,
+            Symbol::new(&env, GOVERNANCE_VOTE_SCOPE),
+            RateLimitConfig {
+                max_calls,
+                window_secs,
+            },
+        );
+
+        Ok(())
+    }
+
     pub fn create_proposal(
         env: Env,
         proposer: Address,
@@ -302,6 +342,16 @@ impl GovernanceContract {
         if is_paused(&env) {
             return Err(ContractError::Paused);
         }
+
+        rate_limit::enforce(
+            &env,
+            Symbol::new(&env, GOVERNANCE_VOTE_SCOPE),
+            &voter,
+            RateLimitConfig {
+                max_calls: DEFAULT_GOVERNANCE_VOTE_RATE_LIMIT_MAX_CALLS,
+                window_secs: DEFAULT_GOVERNANCE_VOTE_RATE_LIMIT_WINDOW_SECS,
+            },
+        )?;
 
         if vote_weight <= 0 {
             return Err(ContractError::InvalidInput);

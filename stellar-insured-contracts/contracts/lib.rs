@@ -132,6 +132,88 @@ pub mod errors {
     }
 }
 
+/// Reusable rate-limiting helpers for DoS protection.
+pub mod rate_limit {
+    use super::*;
+    use soroban_sdk::contracttype;
+
+    #[contracttype]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct RateLimitConfig {
+        pub max_calls: u32,
+        pub window_secs: u64,
+    }
+
+    #[contracttype]
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct RateLimitState {
+        pub window_start: u64,
+        pub call_count: u32,
+    }
+
+    #[contracttype]
+    #[derive(Clone, Debug)]
+    enum RateLimitKey {
+        Config(Symbol),
+        State(Symbol, Address),
+    }
+
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    pub enum RateLimitError {
+        InvalidConfig,
+        Exceeded,
+    }
+
+    pub fn set_config(env: &Env, function_scope: Symbol, config: RateLimitConfig) {
+        env.storage()
+            .persistent()
+            .set(&RateLimitKey::Config(function_scope), &config);
+    }
+
+    pub fn get_config(env: &Env, function_scope: Symbol) -> Option<RateLimitConfig> {
+        env.storage()
+            .persistent()
+            .get(&RateLimitKey::Config(function_scope))
+    }
+
+    pub fn enforce(
+        env: &Env,
+        function_scope: Symbol,
+        caller: &Address,
+        default_config: RateLimitConfig,
+    ) -> Result<(), RateLimitError> {
+        let config = get_config(env, function_scope.clone()).unwrap_or(default_config);
+
+        if config.max_calls == 0 || config.window_secs == 0 {
+            return Err(RateLimitError::InvalidConfig);
+        }
+
+        let now = env.ledger().timestamp();
+        let state_key = RateLimitKey::State(function_scope.clone(), caller.clone());
+        let mut state: RateLimitState = env.storage().persistent().get(&state_key).unwrap_or(RateLimitState {
+            window_start: now,
+            call_count: 0,
+        });
+
+        if now >= state.window_start.saturating_add(config.window_secs) {
+            state.window_start = now;
+            state.call_count = 0;
+        }
+
+        if state.call_count >= config.max_calls {
+            env.events().publish(
+                (Symbol::new(env, "rate_limit_violation"), function_scope),
+                (caller.clone(), config.max_calls, config.window_secs, now),
+            );
+            return Err(RateLimitError::Exceeded);
+        }
+
+        state.call_count = state.call_count.saturating_add(1);
+        env.storage().persistent().set(&state_key, &state);
+        Ok(())
+    }
+}
+
 /// Utility functions for contract operations
 pub mod utils {
     use super::*;

@@ -44,6 +44,7 @@ use insurance_contracts::authorization::{
     get_role, initialize_admin, register_trusted_contract, require_admin, require_claim_processing,
     require_trusted_contract, Role,
 };
+use insurance_contracts::rate_limit::{self, RateLimitConfig};
 use insurance_contracts::types::ClaimStatus;
 
 // Import invariants and safety assertions
@@ -76,6 +77,9 @@ const CLM_ORA: Symbol = symbol_short!("CLM_ORA");
 // New storage keys for claim indexing
 const CLAIM_LIST: Symbol = symbol_short!("CLM_LST");
 const CLAIM_COUNTER: Symbol = symbol_short!("CLM_CNT");
+const CLAIM_SUBMIT_SCOPE: &str = "claim_submit";
+const DEFAULT_CLAIM_SUBMIT_RATE_LIMIT_MAX_CALLS: u32 = 3;
+const DEFAULT_CLAIM_SUBMIT_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
 /// Maximum number of claims to return in a single paginated request.
 const MAX_PAGINATION_LIMIT: u32 = 50;
@@ -106,6 +110,8 @@ pub enum ContractError {
     InvalidAmount = 103,
     CoverageExceeded = 105,
     Overflow = 107,
+    RateLimitExceeded = 108,
+    InvalidRateLimitConfig = 109,
 }
 
 impl From<insurance_contracts::authorization::AuthError> for ContractError {
@@ -135,6 +141,19 @@ impl From<InvariantError> for ContractError {
             InvariantError::CoverageExceeded => ContractError::CoverageExceeded,
             InvariantError::Overflow => ContractError::Overflow,
             _ => ContractError::InvalidState,
+        }
+    }
+}
+
+impl From<insurance_contracts::rate_limit::RateLimitError> for ContractError {
+    fn from(err: insurance_contracts::rate_limit::RateLimitError) -> Self {
+        match err {
+            insurance_contracts::rate_limit::RateLimitError::Exceeded => {
+                ContractError::RateLimitExceeded
+            }
+            insurance_contracts::rate_limit::RateLimitError::InvalidConfig => {
+                ContractError::InvalidRateLimitConfig
+            }
         }
     }
 }
@@ -246,6 +265,27 @@ impl ClaimsContract {
         Ok(())
     }
 
+    pub fn set_submit_claim_rate_limit(
+        env: Env,
+        admin: Address,
+        max_calls: u32,
+        window_secs: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+
+        rate_limit::set_config(
+            &env,
+            Symbol::new(&env, CLAIM_SUBMIT_SCOPE),
+            RateLimitConfig {
+                max_calls,
+                window_secs,
+            },
+        );
+
+        Ok(())
+    }
+
     /// Initialize oracle validation for the claims contract
     pub fn set_oracle_config(
         env: Env,
@@ -351,6 +391,16 @@ impl ClaimsContract {
         if is_paused(&env) {
             return Err(ContractError::Paused);
         }
+
+        rate_limit::enforce(
+            &env,
+            Symbol::new(&env, CLAIM_SUBMIT_SCOPE),
+            &claimant,
+            RateLimitConfig {
+                max_calls: DEFAULT_CLAIM_SUBMIT_RATE_LIMIT_MAX_CALLS,
+                window_secs: DEFAULT_CLAIM_SUBMIT_RATE_LIMIT_WINDOW_SECS,
+            },
+        )?;
 
         // 2. FETCH POLICY DATA
         let (policy_contract_addr, _): (Address, Address) =

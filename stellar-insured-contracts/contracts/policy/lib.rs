@@ -7,6 +7,7 @@ use insurance_contracts::authorization::{
     get_role, initialize_admin, register_trusted_contract, require_admin,
     require_policy_management, Role,
 };
+use insurance_contracts::rate_limit::{self, RateLimitConfig};
 
 // Import invariant checks and error types
 use insurance_invariants::{InvariantError, ProtocolInvariants};
@@ -24,6 +25,9 @@ const MAX_PAGINATION_LIMIT: u32 = 50;
 
 /// Storage key for the list of active policy IDs
 const ACTIVE_POLICY_LIST: Symbol = Symbol::short("ACT_POL");
+const POLICY_ISSUE_SCOPE: &str = "policy_issue";
+const DEFAULT_POLICY_ISSUE_RATE_LIMIT_MAX_CALLS: u32 = 5;
+const DEFAULT_POLICY_ISSUE_RATE_LIMIT_WINDOW_SECS: u64 = 60;
 
 #[contract]
 pub struct PolicyContract;
@@ -355,6 +359,8 @@ pub enum ContractError {
     InvalidAmount = 103,
     InvalidPremium = 106,
     Overflow2 = 107,
+    RateLimitExceeded = 108,
+    InvalidRateLimitConfig = 109,
 }
 
 impl From<insurance_contracts::authorization::AuthError> for ContractError {
@@ -384,6 +390,19 @@ impl From<InvariantError> for ContractError {
             InvariantError::InvalidPremium => ContractError::InvalidPremium,
             InvariantError::Overflow => ContractError::Overflow2,
             _ => ContractError::InvalidState,
+        }
+    }
+}
+
+impl From<insurance_contracts::rate_limit::RateLimitError> for ContractError {
+    fn from(err: insurance_contracts::rate_limit::RateLimitError) -> Self {
+        match err {
+            insurance_contracts::rate_limit::RateLimitError::Exceeded => {
+                ContractError::RateLimitExceeded
+            }
+            insurance_contracts::rate_limit::RateLimitError::InvalidConfig => {
+                ContractError::InvalidRateLimitConfig
+            }
         }
     }
 }
@@ -479,6 +498,27 @@ impl PolicyContract {
         Ok(())
     }
 
+    pub fn set_issue_policy_rate_limit(
+        env: Env,
+        admin: Address,
+        max_calls: u32,
+        window_secs: u64,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        require_admin(&env, &admin)?;
+
+        rate_limit::set_config(
+            &env,
+            Symbol::new(&env, POLICY_ISSUE_SCOPE),
+            RateLimitConfig {
+                max_calls,
+                window_secs,
+            },
+        );
+
+        Ok(())
+    }
+
     pub fn issue_policy(
         env: Env,
         manager: Address,
@@ -494,6 +534,16 @@ impl PolicyContract {
         if is_paused(&env) {
             return Err(ContractError::Paused);
         }
+
+        rate_limit::enforce(
+            &env,
+            Symbol::new(&env, POLICY_ISSUE_SCOPE),
+            &manager,
+            RateLimitConfig {
+                max_calls: DEFAULT_POLICY_ISSUE_RATE_LIMIT_MAX_CALLS,
+                window_secs: DEFAULT_POLICY_ISSUE_RATE_LIMIT_WINDOW_SECS,
+            },
+        )?;
 
         validate_address(&env, &holder)?;
 
