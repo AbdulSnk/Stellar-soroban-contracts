@@ -456,3 +456,7 @@ println!("Submissions Used: {}/{}",
 ## Conclusion
 
 The Oracle Validation System provides a robust, configurable framework for protecting the Stellar Insured protocol from oracle-based attacks and failures. Through consensus-based validation, outlier detection, and staleness checks, the system ensures only high-quality, trustworthy data is used for critical decisions like claim approval.
+
+
+
+##I did this oracle network validation issue but my PR wasn't tracked properly. Merge this so it is linked to the issue and I can get credit for it. Thanks!
