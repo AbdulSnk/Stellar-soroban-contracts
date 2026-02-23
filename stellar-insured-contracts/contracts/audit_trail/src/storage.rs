@@ -1,8 +1,10 @@
 #![no_std]
 
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{Address, Bytes, Env, Vec};
 
-use crate::types::{AuditEntry, ComplianceReport, DataKey, ExternalAuditor};
+use crate::types::{
+    AuditEntry, ComplianceReport, DataKey, ExternalAuditor, MerkleRoot, RetentionPolicy,
+};
 
 // ── Ledger TTL constants ─────────────────────────────────────────────────────
 // Audit entries must persist long-term for regulatory compliance.
@@ -147,4 +149,162 @@ pub fn get_auditor(env: &Env, address: &Address) -> Option<ExternalAuditor> {
     env.storage()
         .persistent()
         .get(&DataKey::ExternalAuditor(address.clone()))
+}
+
+// ── Indexes for Query Optimization ───────────────────────────────────────────
+
+pub fn add_to_action_index(env: &Env, action: u8, entry_id: u64) {
+    let key = DataKey::ActionIndex(action);
+    let mut ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    ids.push_back(entry_id);
+    env.storage().persistent().set(&key, &ids);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, AUDIT_TTL_LEDGERS, AUDIT_TTL_LEDGERS);
+}
+
+pub fn get_action_index(env: &Env, action: u8) -> Vec<u64> {
+    let key = DataKey::ActionIndex(action);
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn add_to_actor_index(env: &Env, actor: &Address, entry_id: u64) {
+    let key = DataKey::ActorIndex(actor.clone());
+    let mut ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    ids.push_back(entry_id);
+    env.storage().persistent().set(&key, &ids);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, AUDIT_TTL_LEDGERS, AUDIT_TTL_LEDGERS);
+}
+
+pub fn get_actor_index(env: &Env, actor: &Address) -> Vec<u64> {
+    let key = DataKey::ActorIndex(actor.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn add_to_ledger_index(env: &Env, ledger: u32, entry_id: u64) {
+    let key = DataKey::LedgerIndex(ledger);
+    let mut ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    ids.push_back(entry_id);
+    env.storage().persistent().set(&key, &ids);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, AUDIT_TTL_LEDGERS, AUDIT_TTL_LEDGERS);
+}
+
+pub fn get_ledger_index(env: &Env, ledger: u32) -> Vec<u64> {
+    let key = DataKey::LedgerIndex(ledger);
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+// ── Entry Hash Chain ─────────────────────────────────────────────────────────
+
+pub fn get_last_entry_hash(env: &Env) -> Option<Bytes> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::LastEntryHash)
+}
+
+pub fn set_last_entry_hash(env: &Env, hash: &Bytes) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::LastEntryHash, hash);
+    env.storage()
+        .persistent()
+        .extend_ttl(&DataKey::LastEntryHash, AUDIT_TTL_LEDGERS, AUDIT_TTL_LEDGERS);
+}
+
+// ── Merkle Roots ─────────────────────────────────────────────────────────────
+
+pub fn get_merkle_root_count(env: &Env) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::MerkleRootCount)
+        .unwrap_or(0u64)
+}
+
+pub fn increment_merkle_root_count(env: &Env) -> u64 {
+    let count = get_merkle_root_count(env) + 1;
+    env.storage()
+        .persistent()
+        .set(&DataKey::MerkleRootCount, &count);
+    env.storage()
+        .persistent()
+        .extend_ttl(&DataKey::MerkleRootCount, AUDIT_TTL_LEDGERS, AUDIT_TTL_LEDGERS);
+    count
+}
+
+pub fn save_merkle_root(env: &Env, root: &MerkleRoot) {
+    let key = DataKey::MerkleRoot(root.start_entry_id);
+    env.storage().persistent().set(&key, root);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, AUDIT_TTL_LEDGERS, AUDIT_TTL_LEDGERS);
+}
+
+pub fn get_merkle_root(env: &Env, batch_id: u64) -> Option<MerkleRoot> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::MerkleRoot(batch_id))
+}
+
+// ── Retention Policies ───────────────────────────────────────────────────────
+
+pub fn get_retention_policy_count(env: &Env) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::RetentionPolicyCount)
+        .unwrap_or(0u64)
+}
+
+pub fn increment_retention_policy_count(env: &Env) -> u64 {
+    let count = get_retention_policy_count(env) + 1;
+    env.storage()
+        .persistent()
+        .set(&DataKey::RetentionPolicyCount, &count);
+    env.storage()
+        .persistent()
+        .extend_ttl(&DataKey::RetentionPolicyCount, ADMIN_TTL_LEDGERS, ADMIN_TTL_LEDGERS);
+    count
+}
+
+pub fn save_retention_policy(env: &Env, policy: &RetentionPolicy) {
+    let key = DataKey::RetentionPolicy(policy.policy_id);
+    env.storage().persistent().set(&key, policy);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, ADMIN_TTL_LEDGERS, ADMIN_TTL_LEDGERS);
+}
+
+pub fn get_retention_policy(env: &Env, policy_id: u64) -> Option<RetentionPolicy> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::RetentionPolicy(policy_id))
+}
+
+pub fn remove_retention_policy(env: &Env, policy_id: u64) {
+    let key = DataKey::RetentionPolicy(policy_id);
+    env.storage().persistent().remove(&key);
 }
