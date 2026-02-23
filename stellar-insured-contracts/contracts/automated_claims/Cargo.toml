@@ -1,0 +1,17 @@
+[package]
+name = "automated-claims"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "automated_claims"
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+insurance-contracts = { path = ".." }
+emergency-pause = { path = "../emergency_pause" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

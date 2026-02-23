@@ -1,0 +1,18 @@
+[package]
+name = "risk-assessment"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "risk_assessment"
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+insurance-contracts = { path = ".." }
+insurance-invariants = { path = "../invariants" }
+emergency-pause = { path = "../emergency_pause" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
