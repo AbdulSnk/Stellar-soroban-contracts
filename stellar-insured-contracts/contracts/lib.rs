@@ -21,6 +21,24 @@ pub mod authorization {
     };
 }
 
+/// Re-export emergency pause module
+pub mod emergency_pause {
+    pub use emergency_pause::{
+        EmergencyPauseConfig, EmergencyPauseEvent,
+        initialize, activate_emergency_pause, deactivate_emergency_pause,
+        pause_functions, unpause_functions, validate_not_paused,
+        get_pause_config, get_pause_history,
+    };
+}
+
+/// Re-export gas optimization module
+pub mod gas_optimization {
+    pub use gas_optimization::{
+        GasOptimizer, PerformanceMonitor,
+        track_operation, optimize_storage_access,
+    };
+}
+
 /// Common contract types shared across all insurance contracts
 pub mod types {
     use super::*;
