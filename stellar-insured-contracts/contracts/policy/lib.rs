@@ -361,10 +361,11 @@ pub enum ContractError {
     InvalidRole = 11,
     RoleNotFound = 12,
     NotTrustedContract = 13,
+    PolicyExpired = 14,
 
     /// Invalid state transition attempted
     // State transition errors
-    InvalidStateTransition = 14,
+    InvalidStateTransition = 15,
     // Invariant violation errors (100-199)
     InvalidPolicyState = 101,
     InvalidAmount = 103,
@@ -459,6 +460,75 @@ fn validate_duration(duration_days: u32) -> Result<(), ContractError> {
         return Err(ContractError::InvalidInput);
     }
     Ok(())
+}
+
+/// Check if a policy is expired based on current ledger time
+fn is_policy_expired(env: &Env, policy: &Policy) -> bool {
+    let current_time = env.ledger().timestamp();
+    current_time > policy.end_time
+}
+
+/// Automatically expire policy if its end time has passed
+/// Returns true if policy was expired, false if still active
+fn auto_expire_policy_if_needed(env: &Env, policy_id: u64, policy: &mut Policy) -> Result<bool, ContractError> {
+    // Only check auto-expiry for ACTIVE policies
+    if !policy.is_active() {
+        return Ok(false);
+    }
+    
+    if is_policy_expired(env, policy) {
+        // Policy has expired - transition to EXPIRED state
+        policy.transition_to(PolicyState::EXPIRED)?;
+        
+        // Save updated policy
+        env.storage().persistent().set(&DataKey::Policy(policy_id), policy);
+        
+        // Remove from active policy list
+        let mut active_list: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&ACTIVE_POLICY_LIST)
+            .unwrap_or_else(|| Vec::new(env));
+
+        // Find and remove the policy ID from the list
+        let mut new_list: Vec<u64> = Vec::new(env);
+        for i in 0..active_list.len() {
+            let id = active_list.get(i).unwrap();
+            if id != policy_id {
+                new_list.push_back(id);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&ACTIVE_POLICY_LIST, &new_list);
+
+        // Record history
+        let history_id = PolicyStateMachine::next_history_id(env);
+        let history = PolicyStatusHistory {
+            policy_id,
+            previous_state: PolicyState::ACTIVE,
+            new_state: PolicyState::EXPIRED,
+            actor: Address::generate(env), // System address for auto-expiry
+            timestamp: env.ledger().timestamp(),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::PolicyStatusHistory(history_id), &history);
+
+        // Emit auto-expiry event
+        env.events().publish(
+            (Symbol::new(env, "PolicyAutoExpired"), policy_id),
+            (
+                policy.holder.clone(),
+                policy.end_time,
+                env.ledger().timestamp(),
+            ),
+        );
+        
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 #[contractimpl]
@@ -652,6 +722,12 @@ impl PolicyContract {
 
         let mut policy = Self::get_policy(env.clone(), policy_id)?;
 
+        // Auto-expiry check already performed in get_policy
+        // Additional explicit check for expired policies
+        if policy.is_expired() {
+            return Err(ContractError::PolicyExpired);
+        }
+
         // Authorization logic
         let is_holder = actor == policy.holder;
         let is_privileged = has_role(&env, &actor, Role::Admin)
@@ -733,54 +809,80 @@ impl PolicyContract {
     }
 
     pub fn get_policy(env: Env, policy_id: u64) -> Result<Policy, ContractError> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Policy(policy_id))
-            .ok_or(ContractError::NotFound)
-    }
-
-    pub fn get_policy_holder(env: Env, policy_id: u64) -> Result<Address, ContractError> {
-        let policy: Policy = env
+        let mut policy: Policy = env
             .storage()
             .persistent()
             .get(&DataKey::Policy(policy_id))
             .ok_or(ContractError::NotFound)?;
+            
+        // Auto-expiry check - will transition to EXPIRED if needed
+        auto_expire_policy_if_needed(&env, policy_id, &mut policy)?;
+        
+        Ok(policy)
+    }
+
+    pub fn get_policy_holder(env: Env, policy_id: u64) -> Result<Address, ContractError> {
+        let mut policy: Policy = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Policy(policy_id))
+            .ok_or(ContractError::NotFound)?;
+            
+        // Auto-expiry check - will transition to EXPIRED if needed
+        auto_expire_policy_if_needed(&env, policy_id, &mut policy)?;
+        
         Ok(policy.holder)
     }
 
     pub fn get_coverage_amount(env: Env, policy_id: u64) -> Result<i128, ContractError> {
-        let policy: Policy = env
+        let mut policy: Policy = env
             .storage()
             .persistent()
             .get(&DataKey::Policy(policy_id))
             .ok_or(ContractError::NotFound)?;
+            
+        // Auto-expiry check - will transition to EXPIRED if needed
+        auto_expire_policy_if_needed(&env, policy_id, &mut policy)?;
+        
         Ok(policy.coverage_amount)
     }
 
     pub fn get_premium_amount(env: Env, policy_id: u64) -> Result<i128, ContractError> {
-        let policy: Policy = env
+        let mut policy: Policy = env
             .storage()
             .persistent()
             .get(&DataKey::Policy(policy_id))
             .ok_or(ContractError::NotFound)?;
+            
+        // Auto-expiry check - will transition to EXPIRED if needed
+        auto_expire_policy_if_needed(&env, policy_id, &mut policy)?;
+        
         Ok(policy.premium_amount)
     }
 
     pub fn get_policy_state(env: Env, policy_id: u64) -> Result<PolicyState, ContractError> {
-        let policy: Policy = env
+        let mut policy: Policy = env
             .storage()
             .persistent()
             .get(&DataKey::Policy(policy_id))
             .ok_or(ContractError::NotFound)?;
+            
+        // Auto-expiry check - will transition to EXPIRED if needed
+        auto_expire_policy_if_needed(&env, policy_id, &mut policy)?;
+        
         Ok(policy.state())
     }
 
     pub fn get_policy_dates(env: Env, policy_id: u64) -> Result<(u64, u64), ContractError> {
-        let policy: Policy = env
+        let mut policy: Policy = env
             .storage()
             .persistent()
             .get(&DataKey::Policy(policy_id))
             .ok_or(ContractError::NotFound)?;
+            
+        // Auto-expiry check - will transition to EXPIRED if needed
+        auto_expire_policy_if_needed(&env, policy_id, &mut policy)?;
+        
         Ok((policy.start_time, policy.end_time))
     }
 
@@ -1799,6 +1901,265 @@ mod tests {
             
             let active_count_final = PolicyContract::get_active_policy_count(env.clone());
             assert_eq!(active_count_final, 0);
+        });
+    }
+
+    #[test]
+    fn test_policy_auto_expiry_on_access() {
+        let env = Env::default();
+        with_contract_env(&env, || {
+            let admin = Address::generate(&env);
+            let manager = Address::generate(&env);
+            let holder = Address::generate(&env);
+            let risk_pool = Address::generate(&env);
+
+            PolicyContract::initialize(env.clone(), admin.clone(), risk_pool.clone()).unwrap();
+            PolicyContract::grant_manager_role(env.clone(), admin.clone(), manager.clone()).unwrap();
+
+            let coverage = MIN_COVERAGE_AMOUNT + 1000;
+            let premium = MIN_PREMIUM_AMOUNT + 100;
+            let duration = 30; // 30 days
+
+            let policy_id = PolicyContract::issue_policy(
+                env.clone(),
+                manager.clone(),
+                holder.clone(),
+                coverage,
+                premium,
+                duration,
+                false,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+            // Policy should be active initially
+            let policy = PolicyContract::get_policy(env.clone(), policy_id).unwrap();
+            assert_eq!(policy.state(), PolicyState::ACTIVE);
+            assert_eq!(policy.end_time, policy.start_time + 30 * 86400);
+
+            // Fast forward time beyond policy end time
+            env.ledger().set_timestamp(policy.start_time + 31 * 86400);
+
+            // Access policy should trigger auto-expiry
+            let expired_policy = PolicyContract::get_policy(env.clone(), policy_id).unwrap();
+            assert_eq!(expired_policy.state(), PolicyState::EXPIRED);
+
+            // Verify policy is no longer in active list
+            let active_count = PolicyContract::get_active_policy_count(env.clone());
+            assert_eq!(active_count, 0);
+        });
+    }
+
+    #[test]
+    fn test_policy_renewal_rejected_for_expired_policy() {
+        let env = Env::default();
+        with_contract_env(&env, || {
+            let admin = Address::generate(&env);
+            let manager = Address::generate(&env);
+            let holder = Address::generate(&env);
+            let risk_pool = Address::generate(&env);
+
+            PolicyContract::initialize(env.clone(), admin.clone(), risk_pool.clone()).unwrap();
+            PolicyContract::grant_manager_role(env.clone(), admin.clone(), manager.clone()).unwrap();
+
+            let coverage = MIN_COVERAGE_AMOUNT + 1000;
+            let premium = MIN_PREMIUM_AMOUNT + 100;
+            let duration = 30;
+
+            let policy_id = PolicyContract::issue_policy(
+                env.clone(),
+                manager.clone(),
+                holder.clone(),
+                coverage,
+                premium,
+                duration,
+                false,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+            // Fast forward time beyond policy end time
+            let policy = PolicyContract::get_policy(env.clone(), policy_id).unwrap();
+            env.ledger().set_timestamp(policy.start_time + 31 * 86400);
+
+            // Try to renew expired policy - should fail
+            let result = PolicyContract::renew_policy(env.clone(), holder.clone(), policy_id, 30);
+            assert_eq!(result, Err(ContractError::PolicyExpired));
+        });
+    }
+
+    #[test]
+    fn test_policy_cancellation_rejected_for_expired_policy() {
+        let env = Env::default();
+        with_contract_env(&env, || {
+            let admin = Address::generate(&env);
+            let manager = Address::generate(&env);
+            let holder = Address::generate(&env);
+            let risk_pool = Address::generate(&env);
+
+            PolicyContract::initialize(env.clone(), admin.clone(), risk_pool.clone()).unwrap();
+            PolicyContract::grant_manager_role(env.clone(), admin.clone(), manager.clone()).unwrap();
+
+            let coverage = MIN_COVERAGE_AMOUNT + 1000;
+            let premium = MIN_PREMIUM_AMOUNT + 100;
+            let duration = 30;
+
+            let policy_id = PolicyContract::issue_policy(
+                env.clone(),
+                manager.clone(),
+                holder.clone(),
+                coverage,
+                premium,
+                duration,
+                false,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+            // Fast forward time beyond policy end time
+            let policy = PolicyContract::get_policy(env.clone(), policy_id).unwrap();
+            env.ledger().set_timestamp(policy.start_time + 31 * 86400);
+
+            // Try to cancel expired policy - should fail due to state transition
+            let result = PolicyContract::cancel_policy(env.clone(), admin.clone(), policy_id);
+            assert_eq!(result, Err(ContractError::InvalidStateTransition));
+        });
+    }
+
+    #[test]
+    fn test_edge_case_policy_expires_exactly_at_current_time() {
+        let env = Env::default();
+        with_contract_env(&env, || {
+            let admin = Address::generate(&env);
+            let manager = Address::generate(&env);
+            let holder = Address::generate(&env);
+            let risk_pool = Address::generate(&env);
+
+            PolicyContract::initialize(env.clone(), admin.clone(), risk_pool.clone()).unwrap();
+            PolicyContract::grant_manager_role(env.clone(), admin.clone(), manager.clone()).unwrap();
+
+            let coverage = MIN_COVERAGE_AMOUNT + 1000;
+            let premium = MIN_PREMIUM_AMOUNT + 100;
+            let duration = 30;
+
+            let policy_id = PolicyContract::issue_policy(
+                env.clone(),
+                manager.clone(),
+                holder.clone(),
+                coverage,
+                premium,
+                duration,
+                false,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+            let policy = PolicyContract::get_policy(env.clone(), policy_id).unwrap();
+            
+            // Set time exactly to end_time - policy should still be active
+            env.ledger().set_timestamp(policy.end_time);
+            let policy_at_end = PolicyContract::get_policy(env.clone(), policy_id).unwrap();
+            assert_eq!(policy_at_end.state(), PolicyState::ACTIVE);
+
+            // Set time 1 second after end_time - policy should be expired
+            env.ledger().set_timestamp(policy.end_time + 1);
+            let policy_expired = PolicyContract::get_policy(env.clone(), policy_id).unwrap();
+            assert_eq!(policy_expired.state(), PolicyState::EXPIRED);
+        });
+    }
+
+    #[test]
+    fn test_multiple_policy_auto_expiry() {
+        let env = Env::default();
+        with_contract_env(&env, || {
+            let admin = Address::generate(&env);
+            let manager = Address::generate(&env);
+            let holder = Address::generate(&env);
+            let risk_pool = Address::generate(&env);
+
+            PolicyContract::initialize(env.clone(), admin.clone(), risk_pool.clone()).unwrap();
+            PolicyContract::grant_manager_role(env.clone(), admin.clone(), manager.clone()).unwrap();
+
+            let coverage = MIN_COVERAGE_AMOUNT + 1000;
+            let premium = MIN_PREMIUM_AMOUNT + 100;
+
+            // Issue multiple policies with different durations
+            let policy1 = PolicyContract::issue_policy(
+                env.clone(),
+                manager.clone(),
+                holder.clone(),
+                coverage,
+                premium,
+                10, // 10 days
+                false,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+            let policy2 = PolicyContract::issue_policy(
+                env.clone(),
+                manager.clone(),
+                holder.clone(),
+                coverage,
+                premium,
+                20, // 20 days
+                false,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+            let policy3 = PolicyContract::issue_policy(
+                env.clone(),
+                manager.clone(),
+                holder.clone(),
+                coverage,
+                premium,
+                30, // 30 days
+                false,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+            // Initially all should be active
+            assert_eq!(PolicyContract::get_active_policy_count(env.clone()), 3);
+
+            // Fast forward to day 15 - policy1 should be expired
+            let base_time = env.ledger().timestamp();
+            env.ledger().set_timestamp(base_time + 15 * 86400);
+
+            // Access all policies to trigger auto-expiry checks
+            let p1 = PolicyContract::get_policy(env.clone(), policy1).unwrap();
+            let p2 = PolicyContract::get_policy(env.clone(), policy2).unwrap();
+            let p3 = PolicyContract::get_policy(env.clone(), policy3).unwrap();
+
+            assert_eq!(p1.state(), PolicyState::EXPIRED);
+            assert_eq!(p2.state(), PolicyState::ACTIVE);
+            assert_eq!(p3.state(), PolicyState::ACTIVE);
+            assert_eq!(PolicyContract::get_active_policy_count(env.clone()), 2);
+
+            // Fast forward to day 25 - policy2 should also be expired
+            env.ledger().set_timestamp(base_time + 25 * 86400);
+
+            let p2_expired = PolicyContract::get_policy(env.clone(), policy2).unwrap();
+            let p3_still_active = PolicyContract::get_policy(env.clone(), policy3).unwrap();
+
+            assert_eq!(p2_expired.state(), PolicyState::EXPIRED);
+            assert_eq!(p3_still_active.state(), PolicyState::ACTIVE);
+            assert_eq!(PolicyContract::get_active_policy_count(env.clone()), 1);
         });
     }
 }

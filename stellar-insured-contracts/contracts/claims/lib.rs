@@ -97,15 +97,16 @@ pub enum ContractError {
     InvalidState = 7,
     NotInitialized = 9,
     AlreadyInitialized = 10,
+    PolicyExpired = 11,
     // Oracle errors
-    OracleValidationFailed = 11,
-    InsufficientOracleSubmissions = 12,
-    OracleDataStale = 13,
-    OracleOutlierDetected = 14,
+    OracleValidationFailed = 12,
+    InsufficientOracleSubmissions = 13,
+    OracleDataStale = 14,
+    OracleOutlierDetected = 15,
     // Authorization errors
-    InvalidRole = 15,
-    RoleNotFound = 16,
-    NotTrustedContract = 17,
+    InvalidRole = 16,
+    RoleNotFound = 17,
+    NotTrustedContract = 18,
     // Invariant violation errors (100-199)
     InvalidClaimState = 102,
     InvalidAmount = 103,
@@ -198,6 +199,24 @@ fn is_paused(env: &Env) -> bool {
 
 fn set_paused(env: &Env, paused: bool) {
     env.storage().persistent().set(&PAUSED, &paused);
+}
+
+/// Check if a policy is expired by querying the policy contract
+fn check_policy_not_expired(env: &Env, policy_contract_addr: &Address, policy_id: u64) -> Result<(), ContractError> {
+    // Get policy state from policy contract
+    let policy_state: u32 = env.invoke_contract(
+        policy_contract_addr,
+        &Symbol::new(env, "get_policy_state"),
+        (policy_id,).into_val(env),
+    );
+    
+    // PolicyState enum values: ACTIVE=0, EXPIRED=1, CANCELLED=2
+    // If policy state is EXPIRED (1), reject the claim
+    if policy_state == 1 {
+        return Err(ContractError::PolicyExpired);
+    }
+    
+    Ok(())
 }
 
 /// I3: Validate claim state transition
@@ -419,6 +438,9 @@ impl ClaimsContract {
         // 2. FETCH POLICY DATA
         let (policy_contract_addr, _): (Address, Address) =
             env.storage().persistent().get(&CONFIG).ok_or(ContractError::NotInitialized)?;
+
+        // 2.5. POLICY EXPIRY CHECK - Reject claims for expired policies
+        check_policy_not_expired(&env, &policy_contract_addr, policy_id)?;
 
         // TODO: Replace with contractimport + client calls once the policy wasm artifact
         // is available during tests/build.
