@@ -1,0 +1,14 @@
+[package]
+name = "zk-identity"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "zk_identity"
+path = "src/lib.rs"
+
+[dependencies]
+soroban-sdk = { workspace = true }
+shared = { path = "../shared" }
+authorization = { path = "../authorization" }
+did-contract = { path = "../did" }

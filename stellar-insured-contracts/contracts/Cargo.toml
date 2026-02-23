@@ -14,3 +14,9 @@ shared = { path = "shared" }
 asset-registry = { path = "asset_registry" }
 emergency-pause = { path = "../emergency_pause" }
 gas-optimization = { path = "../gas_optimization" }
+did-contract = { path = "did" }
+performance-monitoring = { path = "performance_monitoring" }
+analytics-storage = { path = "analytics_storage" }
+monitoring-dashboard = { path = "monitoring_dashboard" }
+alerting-system = { path = "alerting_system" }
+external-monitoring = { path = "external_monitoring" }

@@ -1,0 +1,14 @@
+[package]
+name = "identity-verification"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "identity_verification"
+path = "src/lib.rs"
+
+[dependencies]
+soroban-sdk = { workspace = true }
+shared = { path = "../shared" }
+authorization = { path = "../authorization" }
+did-contract = { path = "../did" }

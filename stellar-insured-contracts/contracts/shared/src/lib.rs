@@ -50,6 +50,10 @@ pub use types::{
     // Privacy/ZKP types
     ZkProof, PrivacySettings, ConfidentialClaim, PrivatePolicyData,
     ZkVerificationResult, PrivacyProof, ComplianceRecord,
+    // DID (Decentralized Identity) types
+    DidDocument, VerificationMethod, PublicKeyJwk, DidService, ServiceProperty,
+    IdentityVerification, KycRecord, ZkIdentityProof, DidResolutionResult,
+    MetadataProperty,
 };
 
 // Re-export all validation helpers (grouped by domain)

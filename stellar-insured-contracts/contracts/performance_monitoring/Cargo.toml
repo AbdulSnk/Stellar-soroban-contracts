@@ -1,0 +1,13 @@
+[package]
+name = "performance-monitoring"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "performance_monitoring"
+path = "src/lib.rs"
+
+[dependencies]
+soroban-sdk = { workspace = true }
+shared = { path = "../shared" }
+authorization = { path = "../authorization" }

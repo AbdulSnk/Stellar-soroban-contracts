@@ -1,0 +1,13 @@
+[package]
+name = "alerting-system"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "alerting_system"
+path = "src/lib.rs"
+
+[dependencies]
+soroban-sdk = { workspace = true }
+shared = { path = "../shared" }
+performance-monitoring = { path = "../performance_monitoring" }

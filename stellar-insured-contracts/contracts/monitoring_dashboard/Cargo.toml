@@ -1,0 +1,14 @@
+[package]
+name = "monitoring-dashboard"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "monitoring_dashboard"
+path = "src/lib.rs"
+
+[dependencies]
+soroban-sdk = { workspace = true }
+shared = { path = "../shared" }
+performance-monitoring = { path = "../performance_monitoring" }
+analytics-storage = { path = "../analytics_storage" }

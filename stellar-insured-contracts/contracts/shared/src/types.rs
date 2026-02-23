@@ -1017,3 +1017,191 @@ pub struct ComplianceRecord {
     /// Auditor address (if applicable)
     pub auditor: Option<Address>,
 }
+
+// ===== DID (Decentralized Identity) Types =====
+
+/// DID Document structure following W3C DID Core specification
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DidDocument {
+    /// DID identifier
+    pub id: soroban_sdk::String,
+    /// List of DIDs that can control this document
+    pub controller: Vec<soroban_sdk::String>,
+    /// Verification methods (public keys, etc.)
+    pub verification_method: Vec<VerificationMethod>,
+    /// Authentication verification method references
+    pub authentication: Vec<soroban_sdk::String>,
+    /// Assertion method verification method references
+    pub assertion_method: Vec<soroban_sdk::String>,
+    /// Key agreement verification method references
+    pub key_agreement: Vec<soroban_sdk::String>,
+    /// Capability invocation verification method references
+    pub capability_invocation: Vec<soroban_sdk::String>,
+    /// Capability delegation verification method references
+    pub capability_delegation: Vec<soroban_sdk::String>,
+    /// Service endpoints
+    pub service: Vec<DidService>,
+    /// Document creation timestamp
+    pub created_at: u64,
+    /// Document last updated timestamp
+    pub updated_at: u64,
+    /// Document version ID
+    pub version_id: u64,
+}
+
+/// Verification method for DID documents
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerificationMethod {
+    /// Verification method ID
+    pub id: soroban_sdk::String,
+    /// Verification method type (e.g., "Ed25519VerificationKey2018")
+    pub type_: soroban_sdk::String,
+    /// Controller DID
+    pub controller: soroban_sdk::String,
+    /// Public key in base58 format
+    pub public_key_base58: Option<soroban_sdk::String>,
+    /// Public key in JWK format
+    pub public_key_jwk: Option<PublicKeyJwk>,
+}
+
+/// JSON Web Key representation
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicKeyJwk {
+    /// Key type
+    pub kty: soroban_sdk::String,
+    /// Curve name
+    pub crv: Option<soroban_sdk::String>,
+    /// X coordinate
+    pub x: Option<soroban_sdk::String>,
+    /// Y coordinate
+    pub y: Option<soroban_sdk::String>,
+    /// Key usage
+    pub use_: Option<soroban_sdk::String>,
+}
+
+/// DID Service endpoint
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DidService {
+    /// Service ID
+    pub id: soroban_sdk::String,
+    /// Service type
+    pub type_: soroban_sdk::String,
+    /// Service endpoint URL
+    pub service_endpoint: soroban_sdk::String,
+    /// Additional service properties
+    pub properties: Vec<ServiceProperty>,
+}
+
+/// Service property key-value pair
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceProperty {
+    /// Property key
+    pub key: soroban_sdk::String,
+    /// Property value
+    pub value: soroban_sdk::String,
+}
+
+/// Identity verification record
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdentityVerification {
+    /// Verification ID
+    pub verification_id: u64,
+    /// DID being verified
+    pub did: soroban_sdk::String,
+    /// Verifier address
+    pub verifier: Address,
+    /// Verification type
+    pub verification_type: Symbol,
+    /// Verification level (1-5)
+    pub verification_level: u32,
+    /// List of verified attributes
+    pub verified_attributes: Vec<soroban_sdk::String>,
+    /// Verification expiration timestamp
+    pub expires_at: u64,
+    /// Verification timestamp
+    pub verified_at: u64,
+    /// Hash of verification proof
+    pub proof_hash: BytesN<32>,
+    /// Whether verification is revoked
+    pub is_revoked: bool,
+}
+
+/// KYC record for regulatory compliance
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KycRecord {
+    /// KYC record ID
+    pub kyc_id: u64,
+    /// DID being KYC'd
+    pub did: soroban_sdk::String,
+    /// KYC provider address
+    pub kyc_provider: Address,
+    /// KYC level (1-4)
+    pub kyc_level: u32,
+    /// Risk score (1-100, lower = lower risk)
+    pub risk_score: u32,
+    /// Jurisdiction code
+    pub jurisdiction: soroban_sdk::String,
+    /// KYC verification timestamp
+    pub verified_at: u64,
+    /// KYC expiration timestamp
+    pub expires_at: u64,
+    /// Hash of compliance data
+    pub compliance_data_hash: BytesN<32>,
+    /// Whether KYC is active
+    pub is_active: bool,
+    /// Whether AML screening passed
+    pub aml_screening_passed: bool,
+}
+
+/// Zero-knowledge identity proof
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZkIdentityProof {
+    /// Proof ID
+    pub proof_id: BytesN<32>,
+    /// DID this proof belongs to
+    pub did: soroban_sdk::String,
+    /// Circuit ID used for proof
+    pub circuit_id: Symbol,
+    /// Public inputs for the proof
+    pub public_inputs: Vec<soroban_sdk::String>,
+    /// Proof data
+    pub proof_data: BytesN<32>,
+    /// Hash of verification key
+    pub verification_key_hash: BytesN<32>,
+    /// Proof creation timestamp
+    pub created_at: u64,
+    /// Proof expiration timestamp
+    pub expires_at: u64,
+    /// Whether proof is revoked
+    pub is_revoked: bool,
+}
+
+/// DID resolution result
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DidResolutionResult {
+    /// Resolved DID document
+    pub did_document: DidDocument,
+    /// Resolver metadata
+    pub resolver_metadata: Vec<MetadataProperty>,
+    /// DID method metadata
+    pub method_metadata: Vec<MetadataProperty>,
+}
+
+/// Metadata property key-value pair
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetadataProperty {
+    /// Property key
+    pub key: soroban_sdk::String,
+    /// Property value
+    pub value: soroban_sdk::String,
+}
