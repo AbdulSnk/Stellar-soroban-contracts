@@ -1,0 +1,17 @@
+[package]
+name = "cross-chain-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "cross_chain_bridge"
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+insurance-contracts = { path = ".." }
+emergency-pause = { path = "../emergency_pause" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
