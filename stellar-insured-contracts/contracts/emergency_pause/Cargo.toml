@@ -1,0 +1,15 @@
+[package]
+name = "emergency-pause"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "emergency_pause"
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

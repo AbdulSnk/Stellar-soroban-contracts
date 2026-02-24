@@ -12,6 +12,7 @@ soroban-sdk = { workspace = true }
 authorization = { path = "authorization" }
 shared = { path = "shared" }
 asset-registry = { path = "asset_registry" }
+emergency-pause = { path = "emergency_pause" }
 emergency-pause = { path = "../emergency_pause" }
 gas-optimization = { path = "../gas_optimization" }
 did-contract = { path = "did" }
