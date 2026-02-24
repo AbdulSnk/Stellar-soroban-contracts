@@ -191,6 +191,79 @@ impl RiskPoolContract {
         })
     }
 
+    pub fn withdraw_liquidity(
+        env: Env,
+        provider: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        PerformanceMonitor::track_operation(&env, "withdraw_liquidity", || {
+            Self::withdraw_liquidity_impl(env.clone(), provider.clone(), amount)
+        })
+    }
+
+    fn withdraw_liquidity_impl(
+        env: Env,
+        provider: Address,
+        amount: i128,
+    ) -> Result<(), ContractError> {
+        if is_paused(&env) {
+            return Err(ContractError::Paused);
+        }
+
+        // Provider must authorize the withdrawal
+        provider.require_auth();
+
+        validate_address(&env, &provider)?;
+
+        // Amount must be positive
+        validate_amount(amount)?;
+
+        // Ensure pool is initialized
+        let _config: (Address, i128) =
+            env.storage().persistent().get(&CONFIG).ok_or(ContractError::NotInitialized)?;
+
+        // Fetch current pool stats and reserved total
+        let mut stats: (i128, i128, i128, u64) =
+            env.storage().persistent().get(&POOL_STATS).ok_or(ContractError::NotFound)?;
+
+        let reserved_total: i128 = env.storage().persistent().get(&RESERVED_TOTAL).unwrap_or(0i128);
+
+        // Pool must have available (unreserved) liquidity
+        let available_pool = stats.0.checked_sub(reserved_total).ok_or(ContractError::Overflow)?;
+        if available_pool < amount {
+            return Err(ContractError::InsufficientFunds);
+        }
+
+        // Fetch provider info and ensure provider has sufficient balance
+        let provider_info: (i128, i128, u64) = env
+            .storage()
+            .persistent()
+            .get(&(PROVIDER, provider.clone()))
+            .ok_or(ContractError::NotFound)?;
+
+        let provider_balance = provider_info.0;
+        if provider_balance < amount {
+            return Err(ContractError::InsufficientFunds);
+        }
+
+        // Update provider balance (decrease) using optimized helper
+        OptimizedRiskPool::update_provider_info_optimized(&env, &provider, -amount, 0)?;
+
+        // Update pool statistics: reduce liquidity, do not change deposits or provider count
+        OptimizedRiskPool::update_pool_stats_optimized(&env, -amount, 0, 0, 0)?;
+
+        // Re-check invariants
+        check_liquidity_invariant(&env)?;
+
+        let new_balance = provider_balance.checked_sub(amount).ok_or(ContractError::Overflow)?;
+        env.events().publish(
+            (Symbol::new(&env, "liquidity_withdrawn"), provider.clone()),
+            (amount, new_balance),
+        );
+
+        Ok(())
+    }
+
     fn deposit_liquidity_impl(
         env: Env,
         provider: Address,
@@ -1498,6 +1571,85 @@ mod tests {
 
         let reserved_total: i128 = env.storage().persistent().get(&RESERVED_TOTAL).unwrap();
         assert_eq!(reserved_total, 3000);  // Only claim 2 is still reserved
+    }
+
+    // ============================================================
+    // WITHDRAW LIQUIDITY TESTS
+    // ============================================================
+
+    #[test]
+    fn test_withdraw_liquidity_success() {
+        let (env, admin, xlm_token, claims_contract) = setup_test_env();
+        initialize_pool(&env, &admin, &xlm_token, &claims_contract);
+
+        let provider = Address::generate(&env);
+
+        RiskPoolContract::deposit_liquidity(env.clone(), provider.clone(), 10000).unwrap();
+
+        let result = RiskPoolContract::withdraw_liquidity(env.clone(), provider.clone(), 4000);
+        assert!(result.is_ok());
+
+        let stats = RiskPoolContract::get_pool_stats(env.clone()).unwrap();
+        assert_eq!(stats.0, 6000);  // 10000 - 4000
+
+        let provider_info = RiskPoolContract::get_provider_info(env.clone(), provider.clone()).unwrap();
+        assert_eq!(provider_info.0, 6000); // provider balance reduced
+        assert_eq!(provider_info.1, 10000); // total_deposited unchanged
+    }
+
+    #[test]
+    fn test_withdraw_liquidity_exceeds_provider_balance() {
+        let (env, admin, xlm_token, claims_contract) = setup_test_env();
+        initialize_pool(&env, &admin, &xlm_token, &claims_contract);
+
+        let provider = Address::generate(&env);
+
+        RiskPoolContract::deposit_liquidity(env.clone(), provider.clone(), 2000).unwrap();
+
+        let result = RiskPoolContract::withdraw_liquidity(env.clone(), provider.clone(), 3000);
+        assert_eq!(result, Err(ContractError::InsufficientFunds));
+    }
+
+    #[test]
+    fn test_withdraw_liquidity_insufficient_pool_available_due_to_reserve() {
+        let (env, admin, xlm_token, claims_contract) = setup_test_env();
+        initialize_pool(&env, &admin, &xlm_token, &claims_contract);
+
+        let provider = Address::generate(&env);
+        RiskPoolContract::deposit_liquidity(env.clone(), provider.clone(), 5000).unwrap();
+
+        // Reserve most liquidity
+        RiskPoolContract::reserve_liquidity(env.clone(), claims_contract.clone(), 1, 4000).unwrap();
+
+        // Try to withdraw more than available (5000 - 4000 = 1000 available)
+        let result = RiskPoolContract::withdraw_liquidity(env.clone(), provider.clone(), 2000);
+        assert_eq!(result, Err(ContractError::InsufficientFunds));
+    }
+
+    #[test]
+    fn test_withdraw_liquidity_when_paused() {
+        let (env, admin, xlm_token, claims_contract) = setup_test_env();
+        initialize_pool(&env, &admin, &xlm_token, &claims_contract);
+
+        let provider = Address::generate(&env);
+        RiskPoolContract::deposit_liquidity(env.clone(), provider.clone(), 5000).unwrap();
+
+        RiskPoolContract::pause(env.clone(), admin.clone()).unwrap();
+
+        let result = RiskPoolContract::withdraw_liquidity(env.clone(), provider.clone(), 1000);
+        assert_eq!(result, Err(ContractError::Paused));
+    }
+
+    #[test]
+    fn test_withdraw_liquidity_zero_amount() {
+        let (env, admin, xlm_token, claims_contract) = setup_test_env();
+        initialize_pool(&env, &admin, &xlm_token, &claims_contract);
+
+        let provider = Address::generate(&env);
+        RiskPoolContract::deposit_liquidity(env.clone(), provider.clone(), 5000).unwrap();
+
+        let result = RiskPoolContract::withdraw_liquidity(env.clone(), provider.clone(), 0);
+        assert_eq!(result, Err(ContractError::InvalidAmount));
     }
 
     #[test]
