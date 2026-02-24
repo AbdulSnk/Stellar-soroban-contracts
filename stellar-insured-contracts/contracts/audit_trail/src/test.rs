@@ -276,10 +276,10 @@ fn test_query_entries_by_actor() {
         );
     }
 
-    let results = client.get_entries_by_actor(&admin, &actor_a, &1u64, &10u32);
+    let results = client.get_entries_by_actor(&admin, &actor_a, &0u32, &10u32);
     assert_eq!(results.len(), 3);
 
-    let results_b = client.get_entries_by_actor(&admin, &actor_b, &1u64, &10u32);
+    let results_b = client.get_entries_by_actor(&admin, &actor_b, &0u32, &10u32);
     assert_eq!(results_b.len(), 2);
 }
 
@@ -647,4 +647,356 @@ fn test_admin_transfer() {
     client.transfer_admin(&new_admin);
 
     assert_eq!(client.get_admin(), new_admin);
+}
+
+// ── Cryptographic Verification Tests ──────────────────────────────────────────
+
+#[test]
+fn test_entry_hash_computed() {
+    let (env, contract_id, admin) = setup_env();
+    let client = get_client(&env, &contract_id);
+    let actor = Address::generate(&env);
+    let source = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.authorize_caller(&source);
+
+    let entry_id = client.log_entry(
+        &actor,
+        &sample_bytes(&env, 1),
+        &ActionCategory::PolicyCreated,
+        &source,
+        &sample_bytes(&env, 2),
+        &sample_string(&env, "Test entry"),
+        &Severity::Info,
+        &None,
+        &Bytes::new(&env),
+    );
+
+    let entry = client.get_entry(&entry_id);
+    // Entry hash should be 32 bytes (SHA-256)
+    assert_eq!(entry.entry_hash.len(), 32);
+    // First entry should have no previous hash
+    assert!(entry.previous_entry_hash.is_none());
+}
+
+#[test]
+fn test_entry_chain_integrity() {
+    let (env, contract_id, admin) = setup_env();
+    let client = get_client(&env, &contract_id);
+    let actor = Address::generate(&env);
+    let source = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.authorize_caller(&source);
+
+    // Log first entry
+    let id1 = client.log_entry(
+        &actor,
+        &sample_bytes(&env, 1),
+        &ActionCategory::PolicyCreated,
+        &source,
+        &sample_bytes(&env, 2),
+        &sample_string(&env, "First entry"),
+        &Severity::Info,
+        &None,
+        &Bytes::new(&env),
+    );
+
+    // Log second entry
+    let id2 = client.log_entry(
+        &actor,
+        &sample_bytes(&env, 3),
+        &ActionCategory::PolicyUpdated,
+        &source,
+        &sample_bytes(&env, 4),
+        &sample_string(&env, "Second entry"),
+        &Severity::Info,
+        &None,
+        &Bytes::new(&env),
+    );
+
+    let entry1 = client.get_entry(&id1);
+    let entry2 = client.get_entry(&id2);
+
+    // Second entry should reference first entry's hash
+    assert!(entry2.previous_entry_hash.is_some());
+    assert_eq!(entry2.previous_entry_hash.unwrap(), entry1.entry_hash);
+}
+
+#[test]
+fn test_verify_entry_integrity() {
+    let (env, contract_id, admin) = setup_env();
+    let client = get_client(&env, &contract_id);
+    let actor = Address::generate(&env);
+    let source = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.authorize_caller(&source);
+
+    let entry_id = client.log_entry(
+        &actor,
+        &sample_bytes(&env, 1),
+        &ActionCategory::PolicyCreated,
+        &source,
+        &sample_bytes(&env, 2),
+        &sample_string(&env, "Test entry"),
+        &Severity::Info,
+        &None,
+        &Bytes::new(&env),
+    );
+
+    let is_valid = client.verify_entry_integrity(&entry_id);
+    assert!(is_valid);
+}
+
+#[test]
+fn test_verify_chain_integrity() {
+    let (env, contract_id, admin) = setup_env();
+    let client = get_client(&env, &contract_id);
+    let actor = Address::generate(&env);
+    let source = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.authorize_caller(&source);
+
+    // Log multiple entries
+    for i in 0u8..5 {
+        client.log_entry(
+            &actor,
+            &sample_bytes(&env, i),
+            &ActionCategory::PremiumPaid,
+            &source,
+            &sample_bytes(&env, i + 10),
+            &sample_string(&env, "Payment"),
+            &Severity::Info,
+            &None,
+            &Bytes::new(&env),
+        );
+    }
+
+    let is_valid = client.verify_chain_integrity(&1u64, &5u64);
+    assert!(is_valid);
+}
+
+// ── Index Query Tests ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_get_entries_by_actor_index() {
+    let (env, contract_id, admin) = setup_env();
+    let client = get_client(&env, &contract_id);
+    let actor_a = Address::generate(&env);
+    let actor_b = Address::generate(&env);
+    let source = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.authorize_caller(&source);
+
+    // Log entries for different actors
+    for i in 0u8..3 {
+        client.log_entry(
+            &actor_a,
+            &sample_bytes(&env, i),
+            &ActionCategory::PolicyCreated,
+            &source,
+            &sample_bytes(&env, i),
+            &sample_string(&env, "Policy A"),
+            &Severity::Info,
+            &None,
+            &Bytes::new(&env),
+        );
+    }
+
+    for i in 10u8..12 {
+        client.log_entry(
+            &actor_b,
+            &sample_bytes(&env, i),
+            &ActionCategory::ClaimSubmitted,
+            &source,
+            &sample_bytes(&env, i),
+            &sample_string(&env, "Claim B"),
+            &Severity::Warning,
+            &None,
+            &Bytes::new(&env),
+        );
+    }
+
+    // Query using index (from_index = 0)
+    let results_a = client.get_entries_by_actor(&admin, &actor_a, &0u32, &10u32);
+    assert_eq!(results_a.len(), 3);
+
+    let results_b = client.get_entries_by_actor(&admin, &actor_b, &0u32, &10u32);
+    assert_eq!(results_b.len(), 2);
+}
+
+#[test]
+fn test_get_entries_by_action_index() {
+    let (env, contract_id, admin) = setup_env();
+    let client = get_client(&env, &contract_id);
+    let actor = Address::generate(&env);
+    let source = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.authorize_caller(&source);
+
+    // Log different action types
+    client.log_entry(
+        &actor,
+        &sample_bytes(&env, 1),
+        &ActionCategory::PolicyCreated,
+        &source,
+        &sample_bytes(&env, 1),
+        &sample_string(&env, "Policy"),
+        &Severity::Info,
+        &None,
+        &Bytes::new(&env),
+    );
+
+    client.log_entry(
+        &actor,
+        &sample_bytes(&env, 2),
+        &ActionCategory::ClaimSubmitted,
+        &source,
+        &sample_bytes(&env, 2),
+        &sample_string(&env, "Claim"),
+        &Severity::Warning,
+        &None,
+        &Bytes::new(&env),
+    );
+
+    client.log_entry(
+        &actor,
+        &sample_bytes(&env, 3),
+        &ActionCategory::PolicyCreated,
+        &source,
+        &sample_bytes(&env, 3),
+        &sample_string(&env, "Another policy"),
+        &Severity::Info,
+        &None,
+        &Bytes::new(&env),
+    );
+
+    // Query by action using index
+    let results = client.get_entries_by_action(&admin, &ActionCategory::PolicyCreated, &0u32, &10u32);
+    assert_eq!(results.len(), 2);
+}
+
+// ── Merkle Tree Tests ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_create_merkle_root() {
+    let (env, contract_id, admin) = setup_env();
+    let client = get_client(&env, &contract_id);
+    let actor = Address::generate(&env);
+    let source = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.authorize_caller(&source);
+
+    // Create multiple entries
+    for i in 0u8..4 {
+        client.log_entry(
+            &actor,
+            &sample_bytes(&env, i),
+            &ActionCategory::PremiumPaid,
+            &source,
+            &sample_bytes(&env, i + 10),
+            &sample_string(&env, "Payment"),
+            &Severity::Info,
+            &None,
+            &Bytes::new(&env),
+        );
+    }
+
+    // Create Merkle root for entries 1-4
+    let root = client.create_merkle_root(&admin, &1u64, &4u64);
+    assert_eq!(root.start_entry_id, 1u64);
+    assert_eq!(root.end_entry_id, 4u64);
+    assert_eq!(root.root_hash.len(), 32);
+}
+
+#[test]
+fn test_generate_and_verify_proof() {
+    let (env, contract_id, admin) = setup_env();
+    let client = get_client(&env, &contract_id);
+    let actor = Address::generate(&env);
+    let source = Address::generate(&env);
+
+    client.initialize(&admin);
+    client.authorize_caller(&source);
+
+    // Create entries
+    for i in 0u8..4 {
+        client.log_entry(
+            &actor,
+            &sample_bytes(&env, i),
+            &ActionCategory::PremiumPaid,
+            &source,
+            &sample_bytes(&env, i + 10),
+            &sample_string(&env, "Payment"),
+            &Severity::Info,
+            &None,
+            &Bytes::new(&env),
+        );
+    }
+
+    // Create Merkle root
+    let root = client.create_merkle_root(&admin, &1u64, &4u64);
+
+    // Generate proof for entry 2
+    let proof = client.generate_entry_proof(&admin, &2u64, &1u64, &4u64);
+    assert_eq!(proof.entry_id, 2u64);
+    assert_eq!(proof.merkle_root, root.root_hash);
+    assert!(!proof.proof_path.is_empty());
+}
+
+// ── Retention Policy Tests ────────────────────────────────────────────────────
+
+#[test]
+fn test_create_retention_policy() {
+    let (env, contract_id, admin) = setup_env();
+    let client = get_client(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    let policy_id = client.create_retention_policy(
+        &admin,
+        &Some(Severity::Critical),
+        &None, // Applies to all actions
+        &365u32, // 1 year retention
+        &180u32, // Archive after 6 months
+        &false,  // Don't auto-purge
+    );
+
+    assert_eq!(policy_id, 1u64);
+
+    let policy = client.get_retention_policy(&policy_id);
+    assert_eq!(policy.policy_id, 1u64);
+    assert!(matches!(policy.severity, Some(Severity::Critical)));
+    assert_eq!(policy.retention_period_days, 365u32);
+    assert_eq!(policy.archive_after_days, 180u32);
+    assert!(!policy.auto_purge);
+}
+
+#[test]
+fn test_remove_retention_policy() {
+    let (env, contract_id, admin) = setup_env();
+    let client = get_client(&env, &contract_id);
+
+    client.initialize(&admin);
+
+    let policy_id = client.create_retention_policy(
+        &admin,
+        &None,
+        &None,
+        &365u32,
+        &180u32,
+        &false,
+    );
+
+    client.remove_retention_policy(&admin, &policy_id);
+
+    // Verify policy is removed
+    let result = client.try_get_retention_policy(&policy_id);
+    assert_eq!(result, Err(Ok(AuditError::PolicyNotFound)));
 }

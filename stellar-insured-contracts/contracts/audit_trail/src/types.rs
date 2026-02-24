@@ -89,6 +89,10 @@ pub struct AuditEntry {
     pub related_entry_id: Option<u64>,
     /// Metadata key-value pairs encoded as bytes
     pub metadata: Bytes,
+    /// Hash of the previous entry for chain integrity (32 bytes)
+    pub previous_entry_hash: Option<Bytes>,
+    /// SHA-256 hash of this entry's content for verification (32 bytes)
+    pub entry_hash: Bytes,
 }
 
 /// Compliance report summary
@@ -144,6 +148,50 @@ pub struct AuditorPermissions {
     pub can_flag_entries: bool,
 }
 
+/// Merkle tree node for batch verification
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MerkleNode {
+    pub hash: Bytes,
+    pub left_child: Option<u64>,
+    pub right_child: Option<u64>,
+    pub entry_id: Option<u64>, // For leaf nodes
+}
+
+/// Merkle tree root for a batch of entries
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct MerkleRoot {
+    pub root_hash: Bytes,
+    pub start_entry_id: u64,
+    pub end_entry_id: u64,
+    pub created_at: u64,
+    pub ledger: u32,
+}
+
+/// Cryptographic proof for entry verification
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EntryProof {
+    pub entry_id: u64,
+    pub entry_hash: Bytes,
+    pub proof_path: Vec<Bytes>, // Sibling hashes from leaf to root
+    pub merkle_root: Bytes,
+}
+
+/// Retention policy configuration
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RetentionPolicy {
+    pub policy_id: u64,
+    pub severity: Option<Severity>, // None = applies to all
+    pub action_category: Option<ActionCategory>, // None = applies to all
+    pub retention_period_days: u32,
+    pub archive_after_days: u32,
+    pub auto_purge: bool,
+    pub created_at: u64,
+}
+
 /// Storage keys
 #[contracttype]
 pub enum DataKey {
@@ -155,10 +203,18 @@ pub enum DataKey {
     ExternalAuditor(Address),
     // Index: action category -> list of entry IDs
     ActionIndex(u8),
-    // Index: actor -> latest entry ID for efficient lookups
-    ActorLatest(Address),
+    // Index: actor -> list of entry IDs
+    ActorIndex(Address),
     // Index: ledger -> entry ID (for time-based queries)
     LedgerIndex(u32),
     // Authorized caller contracts
     AuthorizedCaller(Address),
+    // Merkle roots for entry batches
+    MerkleRoot(u64), // batch number
+    MerkleRootCount,
+    // Retention policies
+    RetentionPolicy(u64),
+    RetentionPolicyCount,
+    // Last entry hash for chain
+    LastEntryHash,
 }

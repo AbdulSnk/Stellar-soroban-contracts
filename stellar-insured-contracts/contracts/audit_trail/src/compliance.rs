@@ -1,8 +1,9 @@
 #![no_std]
 
-use soroban_sdk::{Address, Bytes, Env};
+use soroban_sdk::{Address, Bytes, BytesN, Env};
 
 use crate::{
+    crypto::hash_to_bytes,
     errors::AuditError,
     storage,
     types::{ActionCategory, AuditEntry, ComplianceReport, ComplianceStatus, Severity},
@@ -54,15 +55,19 @@ pub fn generate_report(
     let report_id = storage::increment_report_count(env);
     let now = env.ledger().timestamp();
 
-    // Simple report hash: XOR of entry_id bytes + counts as integrity fingerprint.
-    // Production systems should use SHA-256 via a cross-contract call to a crypto helper.
-    let report_hash = build_report_hash(
+    // Compute SHA-256 hash of report data for integrity
+    let report_hash = compute_report_hash(
         env,
         report_id,
+        now,
+        caller,
         period_start,
         period_end,
         total_entries,
+        compliant_count,
         flagged_count,
+        pending_review_count,
+        critical_events,
     );
 
     let report = ComplianceReport {
@@ -76,8 +81,8 @@ pub fn generate_report(
         flagged_count,
         pending_review_count,
         critical_events,
-        categories_covered: Bytes::new(env), // Extended in full impl
-        report_hash,
+        categories_covered: Bytes::new(env),
+        report_hash: hash_to_bytes(env, &report_hash),
     };
 
     storage::save_report(env, &report);
@@ -133,20 +138,29 @@ pub fn clear_entry_flag(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn build_report_hash(
+fn compute_report_hash(
     env: &Env,
     report_id: u64,
+    generated_at: u64,
+    generated_by: &Address,
     period_start: u64,
     period_end: u64,
     total: u32,
+    compliant: u32,
     flagged: u32,
-) -> Bytes {
-    // Simple deterministic fingerprint. Replace with crypto hash in production.
+    pending: u32,
+    critical: u32,
+) -> BytesN<32> {
     let mut data = Bytes::new(env);
     data.extend_from_array(&report_id.to_be_bytes());
+    data.extend_from_array(&generated_at.to_be_bytes());
+    data.extend_from_array(&generated_by.to_xdr(env).to_vec());
     data.extend_from_array(&period_start.to_be_bytes());
     data.extend_from_array(&period_end.to_be_bytes());
-    data.extend_from_array(&(total as u64).to_be_bytes());
-    data.extend_from_array(&(flagged as u64).to_be_bytes());
-    data
+    data.extend_from_array(&total.to_be_bytes());
+    data.extend_from_array(&compliant.to_be_bytes());
+    data.extend_from_array(&flagged.to_be_bytes());
+    data.extend_from_array(&pending.to_be_bytes());
+    data.extend_from_array(&critical.to_be_bytes());
+    env.crypto().sha256(&data)
 }
